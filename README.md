@@ -32,8 +32,8 @@ The marker stores two fingerprints: one of the rule and one of the code. They le
 | --- | --- | --- |
 | ✓ aligned | Rule and code are what Lugus last recorded. | Detach |
 | ● rule changed | You edited the rule. The code needs updating. | **Update Code**, Accept As Is, Detach |
-| ✎ code edited by hand | You changed the code. Does the rule still describe it? | **Accept Code**, Re-align to Rule, Detach |
-| ● rule and code changed | Both were edited. | Update Code, Accept As Is, Detach |
+| ✎ code edited by hand | You changed the code. Does the rule still describe it? | **Accept Code**, Restore, Re-align to Rule, Detach |
+| ● rule and code changed | Both were edited. | Update Code, Accept As Is, Restore Code, Detach |
 | ? not verified | Marker from an older Lugus version. | Accept, Update Code, Detach |
 
 Fingerprints ignore indentation, trailing spaces and blank lines, so moving or re-indenting a block doesn't count as a change.
@@ -52,10 +52,15 @@ Select the lines of an existing function or block, right-click and choose **Lugu
 
 From then on the block works like any other: the model is only called when you change the rule and ask for an update.
 
-### Accept and Detach
+### Accept, Restore, Re-align, Detach
 
-- **Accept** records the current rule and code as aligned without calling the model. Use it after a hand edit the rule still describes, or after rewording a rule without changing its meaning.
-- **Detach** removes the rule and the marker and keeps the code. Undo restores them.
+When you edit the code of a linked block by hand, you have three ways out:
+
+- **Accept** records the current rule and code as aligned, without calling the model. Use it when the rule still describes your edit, or after rewording a rule without changing its meaning.
+- **Restore** puts back the code exactly as it was when it last matched the rule, without calling the model, behind a diff review. Lugus keeps a local copy of every aligned version it sees (keyed by the fingerprint in the marker); if it has none, it looks in the last git commit. The rule is never touched, so in *rule and code changed* Restore undoes only your code edits.
+- **Re-align to Rule** asks the model to fix the current code where it **contradicts** the rule. It makes the smallest change, so edits the rule doesn't forbid (an extra log line, say) stay. If the model finds nothing to change, Lugus never accepts your hand edits silently: it asks whether to accept them or restore the last aligned version.
+
+**Detach** removes the rule and the marker and keeps the code. Undo restores them.
 
 ### See every block that needs attention
 

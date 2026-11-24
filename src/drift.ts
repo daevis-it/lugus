@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { adviseState, describeState, isDrift, mayContainBlocks } from './core/check';
+import { SnapshotStore } from './core/snapshots';
 import { CommentBlock, getBlocks } from './commentParser';
 
 type SeveritySetting = 'off' | 'hint' | 'information' | 'warning';
@@ -30,7 +31,7 @@ export class DriftMonitor implements vscode.Disposable, vscode.CodeActionProvide
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly disposables: vscode.Disposable[] = [];
 
-  constructor() {
+  constructor(private readonly snapshots: SnapshotStore) {
     const watcher = vscode.workspace.createFileSystemWatcher('**/*', true, false, false);
     this.disposables.push(
       this.collection,
@@ -79,12 +80,23 @@ export class DriftMonitor implements vscode.Disposable, vscode.CodeActionProvide
     if (document.uri.scheme !== 'file' && document.uri.scheme !== 'untitled') {
       return;
     }
-    const setting = this.severity();
-    if (setting === 'off' || !mayContainBlocks(document.getText())) {
+    if (!mayContainBlocks(document.getText())) {
       this.collection.delete(document.uri);
       return;
     }
-    const diagnostics = getBlocks(document)
+    const blocks = getBlocks(document);
+    // Every aligned block seen is saved, so a later hand edit can be restored exactly.
+    for (const block of blocks) {
+      if (block.state === 'aligned') {
+        void this.snapshots.remember(block.body.join('\n'));
+      }
+    }
+    const setting = this.severity();
+    if (setting === 'off') {
+      this.collection.delete(document.uri);
+      return;
+    }
+    const diagnostics = blocks
       .filter((block) => isDrift(block.state) || block.state === 'unverified')
       .map((block) => this.toDiagnostic(block, setting));
     this.collection.set(document.uri, diagnostics);
@@ -136,8 +148,17 @@ export class DriftMonitor implements vscode.Disposable, vscode.CodeActionProvide
       const accept = new vscode.CodeAction('Lugus: Accept block as aligned', vscode.CodeActionKind.QuickFix);
       accept.command = { title: accept.title, command: 'lugus.accept', arguments: args };
       accept.diagnostics = [diagnostic];
-      // Hand edits are usually intentional: offer Accept first for them.
-      actions.push(...(diagnostic.code === 'code-edited' ? [accept, update] : [update, accept]));
+      const restore = new vscode.CodeAction('Lugus: Restore last aligned code', vscode.CodeActionKind.QuickFix);
+      restore.command = { title: restore.title, command: 'lugus.restore', arguments: args };
+      restore.diagnostics = [diagnostic];
+      if (diagnostic.code === 'code-edited') {
+        // Hand edits are usually intentional: offer Accept first, then Restore.
+        actions.push(accept, restore, update);
+      } else if (diagnostic.code === 'both-changed') {
+        actions.push(update, accept, restore);
+      } else {
+        actions.push(update, accept);
+      }
     }
     return actions;
   }

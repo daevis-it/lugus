@@ -12,6 +12,7 @@ class Range {
 class Uri {
   constructor(scheme, path) { this.scheme = scheme; this.path = path; }
   toString() { return `${this.scheme}:${this.path}`; }
+  get fsPath() { return this.path; }
   static from({ scheme, path }) { return new Uri(scheme, path); }
   static file(p) { return new Uri('file', p); }
   static joinPath(u, ...parts) { return new Uri(u.scheme, [u.path, ...parts].join('/')); }

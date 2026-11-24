@@ -30,7 +30,8 @@ global.fetch = async (url, init) => {
   return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
 };
 
-ext.activate({ subscriptions: [], secrets: { get: async () => 'sk-ant-test', store: async () => {}, delete: async () => {} } });
+const workspaceState = (() => { const m = new Map(); return { get: (k) => m.get(k), update: async (k, v) => { m.set(k, v); } }; })();
+ext.activate({ subscriptions: [], workspaceState, secrets: { get: async () => 'sk-ant-test', store: async () => {}, delete: async () => {} } });
 
 function open(text, lang) {
   const doc = new Document(text, lang);
@@ -288,6 +289,111 @@ test('show blocks to review: all aligned', async () => {
   await run('lugus.showDrifted');
   assert.equal(log.quickPick.length, 0);
   assert.ok(log.info.some((m) => m.includes('all 1 linked blocks are aligned')));
+});
+
+// ------------------------------------------------------------ restore
+
+test('restore: a hand edit goes back to the last aligned code, no model call', async () => {
+  const { doc } = open(['class A {', '    int F() {', '        //> return forty-two', '    }', '}'].join('\n'));
+  modelReplies = ['return 42;'];
+  await run('lugus.translate', doc.uri, 2);
+  const aligned = doc.text;
+  doc.setText(doc.text.replace('        return 42;', '        var junk = 1;\n        return 42;'));
+  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('code edited'));
+  assert.ok(getCodeLens().provideCodeLenses(doc).some((l) => l.command.command === 'lugus.restore'));
+  requests = [];
+  answers.info.push('Apply');
+  await run('lugus.restore', doc.uri, 2);
+  assert.equal(requests.length, 0);
+  assert.equal(log.diffs.length, 1);
+  assert.equal(doc.text, aligned);
+  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+});
+
+test('restore: works after reopening, from blocks seen aligned by the monitor', async () => {
+  const uri = addFile('Seen.cs', linkedBlock('rule', ['keep();']));
+  const doc = await mock.workspace.openTextDocument(uri);
+  mock.window.activeTextEditor = new Editor(doc);
+  doc.setText(doc.text.replace('keep();', 'keep();\njunk();'));
+  answers.info.push('Apply');
+  await run('lugus.restore', doc.uri, 1);
+  assert.ok(!doc.text.includes('junk'));
+});
+
+test('restore: both changed keeps the new rule and restores only the code', async () => {
+  const { doc } = open('//> say hi');
+  modelReplies = ['hi();'];
+  await run('lugus.translate', doc.uri, 0);
+  doc.setText(doc.text.replace('//> say hi', '//> say hello').replace('hi();', 'hi(); junk();'));
+  answers.info.push('Apply');
+  await run('lugus.restore', doc.uri, 0);
+  assert.ok(doc.text.startsWith('//> say hello\nhi();\n'));
+  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('rule changed'));
+});
+
+test('restore: nothing saved -> clear warning, file untouched', async () => {
+  const { doc } = open(['//> rule', 'x();', '// </lugus> code:0123456789abcdef rule:' + 'f'.repeat(16)].join('\n'));
+  const before = doc.text;
+  await run('lugus.restore', doc.uri, 0);
+  assert.equal(doc.text, before);
+  assert.ok(log.warn.some((m) => m.includes('no copy of the last aligned code')));
+});
+
+test('re-align on hand-edited code: model changes nothing -> user decides, no silent accept', async () => {
+  const { doc } = open('//> compute total');
+  modelReplies = ['total = a + b;'];
+  await run('lugus.translate', doc.uri, 0);
+  const aligned = doc.text;
+  doc.setText(doc.text.replace('total = a + b;', 'total = a + b;\nlog(total);'));
+  const edited = doc.text;
+
+  // Dismissed: nothing changes, still flagged.
+  modelReplies = ['total = a + b;\nlog(total);'];
+  answers.info.push(undefined);
+  await run('lugus.translate', doc.uri, 0);
+  assert.equal(doc.text, edited);
+  assert.ok(log.info.some((m) => m.includes('hand edits included')));
+  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('code edited'));
+
+  // Restore chosen: back to the aligned code.
+  modelReplies = ['total = a + b;\nlog(total);'];
+  answers.info.push('Restore Last Aligned', 'Apply');
+  await run('lugus.translate', doc.uri, 0);
+  assert.equal(doc.text, aligned);
+});
+
+test('re-align on hand-edited code: Accept keeps the edits as aligned', async () => {
+  const { doc } = open('//> compute total');
+  modelReplies = ['total = a + b;'];
+  await run('lugus.translate', doc.uri, 0);
+  doc.setText(doc.text.replace('total = a + b;', 'total = a + b; // checked'));
+  modelReplies = ['total = a + b; // checked'];
+  answers.info.push('Accept Current Code');
+  await run('lugus.translate', doc.uri, 0);
+  assert.ok(doc.text.includes('// checked'));
+  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+});
+
+test('restore: falls back to the committed version in git', async () => {
+  const { execFileSync } = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lugus-git-'));
+  const file = path.join(dir, 'Calc.cs');
+  const committed = ['class C {', ...linkedBlock('add', ['return a + b;']), '}'].join('\n');
+  fs.writeFileSync(file, committed);
+  const git = (...args) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: dir, stdio: 'ignore' });
+  git('init', '-q');
+  git('add', '.');
+  git('commit', '-qm', 'init');
+
+  // Never seen aligned by this session: only git knows the aligned code.
+  const doc = new Document(committed.replace('return a + b;', 'return a + b + junk;'), 'csharp', file);
+  mock.window.activeTextEditor = new Editor(doc);
+  answers.info.push('Apply');
+  await run('lugus.restore', doc.uri, 1);
+  assert.equal(log.warn.length, 0, log.warn.join());
+  assert.equal(doc.text, committed);
 });
 
 (async () => {

@@ -6,7 +6,11 @@
 - **Drift in the Problems panel.** Drifted and not-verified blocks are reported as diagnostics, with **Update code** and **Accept** as quick fixes. Severity is configurable with `lugus.driftSeverity` (`warning` by default, or `information`, `hint`, `off`).
 - **Lugus: Show Blocks to Review** scans the workspace and lists every block whose rule and code are out of sync. Selecting one opens it.
 - **`lugus check` CLI** for pre-commit hooks and CI: `npm install -g github:daevis-it/lugus`, then `lugus check [paths] [--json] [--strict]`. Exits with 1 when a block has drifted.
+- **Restore.** Puts back the code as it was when it last matched the rule, without calling the model and behind a diff review. Lugus keeps a local copy of every aligned version it sees; if none is found it uses the last git commit. Available from CodeLens, quick fixes and the Command Palette.
 - GitHub Actions CI: typecheck, unit tests, end-to-end smoke test and `lugus check` on Linux and Windows, plus a packaged `.vsix` artifact.
+
+### Fixed
+- **Re-align to Rule** on hand-edited code silently accepted the edits when the model found nothing to change. Lugus now asks: accept the current code, or restore the last aligned version.
 
 ### Removed
 - The "logic check" roadmap item. Lugus stays focused on keeping rules and code aligned.

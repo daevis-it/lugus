@@ -1,6 +1,9 @@
+import { execFile } from 'child_process';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { BlockMode, composeBlock, formatMarker } from './core/blocks';
 import { buildPrompt, TranslationMode } from './core/prompts';
+import { findCodeByHash, SnapshotStore } from './core/snapshots';
 import { applyIndentation, canonicalCode, commonIndent, dedent } from './core/text';
 import {
   Provider,
@@ -27,7 +30,47 @@ class UserFacingError extends Error {}
 
 export function activate(context: vscode.ExtensionContext): void {
   const codeLens = new LugusCodeLensProvider();
-  const drift = new DriftMonitor();
+  const snapshots = new SnapshotStore(context.workspaceState);
+  const drift = new DriftMonitor(snapshots);
+
+  /** The code as it was when the block was last aligned: local snapshot first, then the committed file. */
+  async function findAlignedCode(document: vscode.TextDocument, block: CommentBlock): Promise<string | undefined> {
+    const codeHash = block.marker?.codeHash;
+    if (!codeHash) {
+      return undefined;
+    }
+    const local = snapshots.get(codeHash);
+    if (local !== undefined) {
+      return local;
+    }
+    const committed = await readCommittedVersion(document.uri);
+    return committed === undefined ? undefined : findCodeByHash(committed, block.token, codeHash);
+  }
+
+  /** Puts the last aligned code back, keeping the rule as written. Diff review first. */
+  async function restoreBlock(document: vscode.TextDocument, block: CommentBlock, code: string): Promise<boolean> {
+    if (block.markerLine === null) {
+      return false;
+    }
+    const header = block.snapshot.split('\n').slice(0, block.promptEnd - block.promptStart + 1);
+    const marker = document.lineAt(block.markerLine).text;
+    const finalText = [...header, applyIndentation(code, block.indent), marker].join('\n');
+    const approved = await reviewReplacement(
+      document,
+      block.snapshot,
+      finalText,
+      'Lugus: restore the code as it was when it last matched the rule?'
+    );
+    if (!approved) {
+      return false;
+    }
+    const current = relocateBlock(document, block);
+    if (!current) {
+      throw new UserFacingError('The block changed during the review. Nothing was restored; run the command again.');
+    }
+    const editor = await editorFor(document);
+    return editor.edit((edit) => edit.replace(current.fullRange, withEol(document, finalText)));
+  }
   const loading = vscode.window.createTextEditorDecorationType({
     after: {
       contentText: '  ⟳ Lugus is working…',
@@ -200,6 +243,21 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       if (hasCode && canonicalCode(newCode) === canonicalCode(currentCode)) {
+        if (block.state === 'code-edited' || block.state === 'both-changed') {
+          // The model sees nothing to fix, but the code was edited by hand:
+          // never accept those edits silently. Let the user decide.
+          const aligned = await findAlignedCode(document, current);
+          const pick = await vscode.window.showInformationMessage(
+            'Lugus: the model says the current code, hand edits included, already satisfies the rule. Keep it, or go back to the last aligned version?',
+            ...(aligned !== undefined ? ['Accept Current Code', 'Restore Last Aligned'] : ['Accept Current Code'])
+          );
+          if (pick === 'Accept Current Code') {
+            await restampMarker(await editorFor(document), current);
+          } else if (pick === 'Restore Last Aligned' && aligned !== undefined) {
+            await restoreBlock(document, current, aligned);
+          }
+          return;
+        }
         if (current.markerLine !== null) {
           await restampMarker(await editorFor(document), current);
         }
@@ -240,6 +298,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!applied) {
         throw new UserFacingError('Could not apply the change. Make sure the file is still open and editable.');
       }
+      if (blockMode === 'linked') {
+        await snapshots.remember(newCode);
+      }
     } catch (err: unknown) {
       reportError(err, timeoutMs);
     } finally {
@@ -264,6 +325,34 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showWarningMessage('Lugus: could not update the marker. Try again.');
     }
     codeLens.refresh();
+  });
+
+  // ----------------------------------------------------------------- Restore
+
+  const restore = vscode.commands.registerCommand('lugus.restore', async (uriArg?: unknown, lineArg?: unknown) => {
+    const found = await blockAtTarget(uriArg, lineArg, 'Lugus: place the cursor inside a linked block.');
+    if (!found) {
+      return;
+    }
+    const { editor, block } = found;
+    if (block.state !== 'code-edited' && block.state !== 'both-changed') {
+      vscode.window.setStatusBarMessage('Lugus: nothing to restore, the code matches its last aligned version.', 4000);
+      return;
+    }
+    try {
+      const code = await findAlignedCode(editor.document, block);
+      if (code === undefined) {
+        vscode.window.showWarningMessage(
+          'Lugus: no copy of the last aligned code was found (neither saved by Lugus nor in the last commit). Use Undo or your version control.'
+        );
+        return;
+      }
+      await restoreBlock(editor.document, block, code);
+    } catch (err: unknown) {
+      reportError(err, 0);
+    } finally {
+      codeLens.refresh();
+    }
   });
 
   // ------------------------------------------------------------------ Detach
@@ -309,6 +398,7 @@ export function activate(context: vscode.ExtensionContext): void {
     setApiKey,
     translate,
     accept,
+    restore,
     detach,
     vscode.commands.registerCommand('lugus.linkSelection', async () => {
       await linkSelection();
@@ -351,6 +441,25 @@ function wholeLines(document: vscode.TextDocument, from: number, to: number): vs
     return new vscode.Range(document.lineAt(from - 1).range.end, document.lineAt(to).range.end);
   }
   return new vscode.Range(0, 0, to, document.lineAt(to).text.length);
+}
+
+/** The file as committed at HEAD, or undefined outside git / when untracked. */
+function readCommittedVersion(uri: vscode.Uri): Promise<string | undefined> {
+  if (uri.scheme !== 'file') {
+    return Promise.resolve(undefined);
+  }
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        'git',
+        ['show', `HEAD:./${path.basename(uri.fsPath)}`],
+        { cwd: path.dirname(uri.fsPath), timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' },
+        (error, stdout) => resolve(error ? undefined : stdout)
+      );
+    } catch {
+      resolve(undefined); // git missing or folder gone: no fallback, not an error
+    }
+  });
 }
 
 function withEol(document: vscode.TextDocument, text: string): string {

@@ -26,13 +26,15 @@ const LENSES: Record<BlockState, LensSpec[]> = {
   'code-edited': [
     { title: '✎ Lugus: code edited by hand', tooltip: 'The code was changed after it was last aligned with the rule.' },
     { title: 'Accept Code', tooltip: 'The rule still describes this code: record it without calling the model', command: 'lugus.accept' },
-    { title: 'Re-align to Rule', tooltip: 'Ask the model to bring the code back in line with the rule (diff review)', command: 'lugus.translate' },
+    { title: 'Restore', tooltip: 'Go back to the code as it was when it last matched the rule. No model call (diff review)', command: 'lugus.restore' },
+    { title: 'Re-align to Rule', tooltip: 'Ask the model to fix the current code where it contradicts the rule (diff review)', command: 'lugus.translate' },
     { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
   ],
   'both-changed': [
     { title: '● Lugus: rule and code changed', tooltip: 'Both the rule and the code were edited since the last alignment.' },
     { title: 'Update Code', tooltip: 'Edit the current code to match the rule (diff review)', command: 'lugus.translate' },
     { title: 'Accept As Is', tooltip: 'Record the current rule and code as aligned, without calling the model', command: 'lugus.accept' },
+    { title: 'Restore Code', tooltip: 'Undo the hand edits to the code (the rule stays as you wrote it). No model call (diff review)', command: 'lugus.restore' },
     { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
   ],
   unverified: [
