@@ -1,0 +1,3 @@
+# Keep LF everywhere so diffs stay readable on Windows and macOS alike.
+* text=auto eol=lf
+*.vsix binary

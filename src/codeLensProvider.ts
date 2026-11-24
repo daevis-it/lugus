@@ -1,58 +1,79 @@
 import * as vscode from 'vscode';
-import { findAllCommentBlocks } from './commentParser';
+import { BlockState } from './core/blocks';
+import { getBlocks } from './commentParser';
 
-export class LugusCodeLensProvider implements vscode.CodeLensProvider {
-  private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
-  public readonly onDidChangeCodeLenses = this.onDidChangeEmitter.event;
+interface LensSpec {
+  title: string;
+  tooltip: string;
+  command?: string;
+}
+
+/** What each block state shows above the rule. The first lens is the status. */
+const LENSES: Record<BlockState, LensSpec[]> = {
+  unlinked: [
+    { title: '▶ Lugus: Translate', tooltip: 'Generate code for this rule', command: 'lugus.translate' }
+  ],
+  aligned: [
+    { title: '✓ Lugus: aligned', tooltip: 'The code matches the rule Lugus last recorded. No action needed.' },
+    { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
+  ],
+  'rule-changed': [
+    { title: '● Lugus: rule changed', tooltip: 'The rule was edited after the code was last aligned.' },
+    { title: 'Update Code', tooltip: 'Edit the existing code to match the new rule (diff review)', command: 'lugus.translate' },
+    { title: 'Accept As Is', tooltip: 'The code already matches the new rule: record it without calling the model', command: 'lugus.accept' },
+    { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
+  ],
+  'code-edited': [
+    { title: '✎ Lugus: code edited by hand', tooltip: 'The code was changed after it was last aligned with the rule.' },
+    { title: 'Accept Code', tooltip: 'The rule still describes this code: record it without calling the model', command: 'lugus.accept' },
+    { title: 'Re-align to Rule', tooltip: 'Ask the model to bring the code back in line with the rule (diff review)', command: 'lugus.translate' },
+    { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
+  ],
+  'both-changed': [
+    { title: '● Lugus: rule and code changed', tooltip: 'Both the rule and the code were edited since the last alignment.' },
+    { title: 'Update Code', tooltip: 'Edit the current code to match the rule (diff review)', command: 'lugus.translate' },
+    { title: 'Accept As Is', tooltip: 'Record the current rule and code as aligned, without calling the model', command: 'lugus.accept' },
+    { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
+  ],
+  unverified: [
+    { title: '? Lugus: not verified', tooltip: 'This marker was written by an older version and has no rule fingerprint.' },
+    { title: 'Accept', tooltip: 'Record the current rule and code as aligned', command: 'lugus.accept' },
+    { title: 'Update Code', tooltip: 'Edit the current code to match the rule (diff review)', command: 'lugus.translate' },
+    { title: 'Detach', tooltip: 'Remove the rule and marker, keep the code', command: 'lugus.detach' }
+  ]
+};
+
+export class LugusCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
+  private readonly emitter = new vscode.EventEmitter<void>();
+  public readonly onDidChangeCodeLenses = this.emitter.event;
 
   public refresh(): void {
-    this.onDidChangeEmitter.fire();
+    this.emitter.fire();
   }
 
   public dispose(): void {
-    this.onDidChangeEmitter.dispose();
+    this.emitter.dispose();
   }
 
   public provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    const config = vscode.workspace.getConfiguration('lugus');
-    if (!config.get<boolean>('enableCodeLens', true)) {
+    if (!vscode.workspace.getConfiguration('lugus').get<boolean>('enableCodeLens', true)) {
       return [];
     }
-
-    const blocks = findAllCommentBlocks(document);
     const lenses: vscode.CodeLens[] = [];
-
-    for (const block of blocks) {
-      const topLine = block.commentRange.start.line;
-      const lensRange = new vscode.Range(topLine, 0, topLine, 0);
-
-      if (block.isLinked) {
+    for (const block of getBlocks(document)) {
+      const range = new vscode.Range(block.promptStart, 0, block.promptStart, 0);
+      for (const spec of LENSES[block.state]) {
         lenses.push(
-          new vscode.CodeLens(lensRange, {
-            title: '↻ Lugus: Recompile',
-            tooltip: 'Re-translate pseudocode and update the linked code block',
-            command: 'lugus.translate',
-            arguments: [topLine]
-          }),
-          new vscode.CodeLens(lensRange, {
-            title: 'Detach',
-            tooltip: 'Remove Lugus markers and keep only the generated code',
-            command: 'lugus.detach',
-            arguments: [topLine]
-          })
-        );
-      } else {
-        lenses.push(
-          new vscode.CodeLens(lensRange, {
-            title: '▶ Lugus: Translate',
-            tooltip: 'Translate pseudocode block into target language',
-            command: 'lugus.translate',
-            arguments: [topLine]
+          new vscode.CodeLens(range, {
+            title: spec.title,
+            tooltip: spec.tooltip,
+            // An empty command renders the lens as a plain, non-clickable label.
+            command: spec.command ?? '',
+            arguments: spec.command ? [document.uri, block.promptStart] : undefined
           })
         );
       }
     }
-
     return lenses;
   }
 }

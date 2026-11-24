@@ -1,67 +1,98 @@
 # Lugus
 
-**Master of all languages.**
+**Keep the rule next to the code that implements it.**
 
-Write a block's logic as a comment in your own language. Lugus translates it into code for the active VS Code file. When a requirement changes, edit the comment and recompile that block in place. You choose when to translate and which model to use, including one running on your own machine.
+Write what a piece of code must do as a short rule in your own language, right above it. Lugus turns the rule into code for the active file, keeps the two linked, and tells you when they drift apart. When the rule changes, Lugus edits the existing code as little as possible to match. It never regenerates the block from scratch and never overwrites existing code without showing you the diff.
+
+You choose when to call a model and which one to use, including one running on your own machine. Linking existing code, checking drift and accepting changes all run locally.
 
 ## How it works
 
-Suppose `Items` is a C# dictionary. Inside a method, write two consecutive lines describing what it should return:
+Write a rule with the `//>` prefix (`#>` in Python and other `#` languages) and press **Ctrl+Alt+Enter** (**Cmd+Alt+Enter** on macOS), or click **Translate** above it:
 
 ```csharp
 //> Collect the keys from Items where the value is "user".
-//> Return the keys as a list.
+//> Return them as a list.
 ```
 
-Place the cursor on either line and press **Ctrl+Alt+Enter** (**Cmd+Alt+Enter** on macOS), or click **Lugus: Translate** above the comment. In the default `linked` mode, the result might look like this:
+Lugus writes the code below the rule and closes the block with a marker:
 
 ```csharp
 //> Collect the keys from Items where the value is "user".
-//> Return the keys as a list.
+//> Return them as a list.
 return Items.Where(item => item.Value == "user")
             .Select(item => item.Key)
             .ToList();
-// </lugus>
+// </lugus> code:d95f43a14c2ffd18 rule:6f5b250d3e6942f2
 ```
 
-Change the second instruction to `//> Sort the keys alphabetically and return them as a list.` Click **Lugus: Recompile** or use the same shortcut anywhere in the linked block. Lugus replaces the implementation between the instructions and the closing marker, including any edits you made there by hand.
+The marker stores two fingerprints: one of the rule and one of the code. They let Lugus tell you, above every block, where it stands:
 
-Choose **Detach** to remove the pseudocode and the marker while keeping the current code. A single Undo restores the previous edit.
+| Status | Meaning | Actions |
+| --- | --- | --- |
+| ✓ aligned | Rule and code are what Lugus last recorded. | Detach |
+| ● rule changed | You edited the rule. The code needs updating. | **Update Code**, Accept As Is, Detach |
+| ✎ code edited by hand | You changed the code. Does the rule still describe it? | **Accept Code**, Re-align to Rule, Detach |
+| ● rule and code changed | Both were edited. | Update Code, Accept As Is, Detach |
+| ? not verified | Marker from an older Lugus version. | Accept, Update Code, Detach |
 
-The comment prefix follows the file's VS Code language mode:
+Fingerprints ignore indentation, trailing spaces and blank lines, so moving or re-indenting a block doesn't count as a change.
+
+### Updating code when the rule changes
+
+Change the second rule line to `//> Sort them alphabetically and return them as a list.` The status becomes **rule changed**. Click **Update Code** or press the shortcut anywhere inside the block.
+
+Lugus sends the model the rule, the **current code** and the lines around the block, and asks for the smallest edit that satisfies the rule. Signatures, names, comments and logic that the rule doesn't touch must stay as they are. The result always opens in a diff next to your file: choose **Apply** or **Keep Current**. Closing the diff keeps the current code. If the model decides the code already satisfies the rule, Lugus simply marks the block as aligned.
+
+If you edit the file while a request is running, Lugus checks the block again before applying anything. Edits elsewhere in the file are fine. If the block itself changed, nothing is applied and you can run the command again.
+
+### Link code you already have
+
+Select the lines of an existing function or block, right-click and choose **Lugus: Link Selected Code to a Rule**. Describe in your own words the rule it implements. Lugus adds the rule above the code and a marker below it, leaving the code byte-for-byte unchanged. No model call happens. You can add more `//>` lines to the rule afterwards.
+
+From then on the block works like any other: the model is only called when you change the rule and ask for an update.
+
+### Accept and Detach
+
+- **Accept** records the current rule and code as aligned without calling the model. Use it after a hand edit the rule still describes, or after rewording a rule without changing its meaning.
+- **Detach** removes the rule and the marker and keeps the code. Undo restores them.
+
+### Comment prefixes
+
+The prefix follows the file's VS Code language mode:
 
 | Prefix | Languages |
 | --- | --- |
-| `//>` | Default for most languages, including C#, TypeScript, JavaScript, Rust, C++, Go, Java and PHP |
-| `#>` | Python, shell scripts, Ruby, YAML, GDScript, PowerShell, Dockerfile, TOML, Perl and R |
-| `-->` | SQL, Lua, Haskell and Ada |
+| `//>` | Default, including C#, C++, TypeScript, JavaScript, Rust, Go, Java, PHP, Kotlin and Swift |
+| `#>` | Python, shell scripts, Ruby, YAML, GDScript, PowerShell, Dockerfile, TOML, Perl, R, Makefile, Julia and Elixir |
+| `-->` | SQL, Lua, Haskell, Ada and Elm |
 
 ## Installation
 
 Lugus requires VS Code 1.90 or later. Check [GitHub Releases](https://github.com/daevis-it/lugus/releases) for a packaged `.vsix`, or build one using the [development instructions](#development).
 
-Open the Command Palette and run **Extensions: Install from VSIX...**, then select the package. To install from a terminal, run the following from the package directory, using the filename you downloaded or built:
+Open the Command Palette and run **Extensions: Install from VSIX...**, then select the package, or from a terminal:
 
 ```bash
-code --install-extension lugus-0.1.0.vsix
+code --install-extension lugus-0.2.0.vsix
 ```
 
 ## Choose a provider
 
-In VS Code Settings, search for `lugus.provider` and choose where to run translations.
+In Settings, search for `lugus.provider` and choose where translations run.
 
 | Provider | Setup |
 | --- | --- |
-| `anthropic` (default) | Run **Lugus: Set API Key** from the Command Palette with your Anthropic key. The default model is `claude-haiku-4-5`. |
-| `openai` | Set your OpenAI key with the same command. The default model is `gpt-4o-mini`. |
-| `ollama` | Run Ollama locally and download the default model with `ollama pull qwen2.5-coder:7b`. The preset uses `http://localhost:11434/v1` and works without a key. |
-| `custom` | For an OpenAI-compatible service such as OpenRouter, Groq or LM Studio, set both `lugus.baseUrl` and `lugus.model`. Use the API base URL (e.g. `http://localhost:1234/v1`) and the server's model ID. Set an API key for endpoints outside `localhost` and `127.0.0.1`. |
+| `anthropic` (default) | Run **Lugus: Set API Key** with your Anthropic key. Default model: `claude-haiku-4-5`. |
+| `openai` | Set your OpenAI key with the same command. Default model: `gpt-4o-mini`. |
+| `ollama` | Run Ollama locally and pull the default model with `ollama pull qwen2.5-coder:7b`. Uses `http://localhost:11434/v1`, no key needed. |
+| `custom` | Any OpenAI-compatible service (OpenRouter, Groq, LM Studio, DeepSeek…). Set `lugus.baseUrl` (e.g. `http://localhost:1234/v1`) and `lugus.model`. A key is required for endpoints outside `localhost`. |
 
-You can override the model and base URL for any preset. Lugus stores one API key in VS Code's SecretStorage and uses it with the selected endpoint. Run **Lugus: Set API Key** to replace it when switching services, or submit an empty value to clear it.
+You can override the model and base URL for any preset. Lugus stores one API key in VS Code's SecretStorage; run **Lugus: Set API Key** again to replace it, or submit an empty value to remove it. If a response is cut off by the model's output limit, Lugus applies nothing and tells you to split the rule.
 
 ## Project rules and context
 
-Create a plain-text `.lugusrc` in the root of the workspace folder to give the model repository-specific conventions. For the C# example above, you might use:
+Create a plain-text `.lugusrc` in the workspace root to give the model your project's conventions:
 
 ```text
 Target C# 12 and .NET 8.
@@ -69,40 +100,42 @@ Prefer LINQ method syntax where it improves readability.
 Use only dependencies already in the project.
 ```
 
-Each translation sends the instruction, target language, surrounding lines and up to 8,000 characters of project rules to the selected endpoint. Surrounding context comes from outside the block being replaced. Set `lugus.contextLines` to `0` to omit those lines. For local processing, select a locally hosted model. Lugus itself collects no telemetry.
+Each request sends the rule, the current code of the block (when updating), the target language, up to `lugus.contextLines` lines around the block and up to 8,000 characters of `.lugusrc` to the selected endpoint. Set `lugus.contextLines` to `0` to send no surrounding lines. For fully local processing, use a local model. Lugus itself collects no telemetry.
 
-## Editor settings
+## Settings
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `lugus.blockMode` | `linked` | Keeps the editable instruction and closing marker. Choose `replace` for code only or `comment` for an ordinary comment above the code. |
-| `lugus.enableCodeLens` | `true` | Shows Translate, Recompile or Detach above applicable blocks. The keyboard shortcut also works with CodeLens hidden. |
-| `lugus.contextLines` | `20` | Maximum number of surrounding lines to include on each side of the block. |
+| `lugus.blockMode` | `linked` | `linked` keeps the rule and the marker. `replace` leaves only the code; `comment` turns the rule into an ordinary comment. Only `linked` blocks can be tracked. |
+| `lugus.enableCodeLens` | `true` | Shows status and actions above blocks. The shortcut works with CodeLens hidden. |
+| `lugus.contextLines` | `20` | Lines of context sent from each side of the block. |
 | `lugus.languageOverride` | Active file language | Overrides the target language requested from the model. |
-| `lugus.timeoutMs` | `30000` | Sets the request timeout in milliseconds. |
+| `lugus.timeoutMs` | `60000` | Request timeout in milliseconds. Raise it for slow local models. |
 
 ## Development
-
-With Node.js and npm installed, clone and build the extension:
 
 ```bash
 git clone https://github.com/daevis-it/lugus.git
 cd lugus
 npm ci
-npm run build
+npm run build        # bundle to dist/
+npm test             # unit tests for the parser, fingerprints and prompts
+npm run test:smoke   # end-to-end run of the bundled extension on a mocked VS Code API
+npm run typecheck
 ```
 
-Open the cloned folder in VS Code and press **F5** to try Lugus in the Extension Development Host. To create an installable VSIX, run:
+Press **F5** in VS Code to build and start an Extension Development Host. To create an installable package, run `npx @vscode/vsce package`.
 
-```bash
-npx @vscode/vsce package
-```
+The parsing, fingerprint and prompt logic lives in `src/core/` and has no VS Code dependency. The rest of `src/` adapts it to the editor.
 
 ## Roadmap
 
-- [x] Re-compilable linked blocks with Detach support
+- [x] Re-compilable linked blocks with Detach
 - [x] Project conventions through `.lugusrc`
-- [x] Optional CodeLens actions on pseudocode blocks
+- [x] Link existing code to a rule
+- [x] Drift detection: rule and code fingerprints, block status, Accept
+- [x] Updates edit the current code minimally, always behind a diff review
+- [ ] Sidecar mode: keep rules in `.lugus/` instead of in the source, so shared code stays clean ([design](docs/design/sidecar-mode.md))
 - [ ] On-demand logic check for edge cases and null risks, with findings shown separately from the code
 
 ## License

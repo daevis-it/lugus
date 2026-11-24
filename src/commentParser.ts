@@ -1,228 +1,97 @@
 import * as vscode from 'vscode';
-
-export interface CommentBlock {
-  commentRange: vscode.Range;
-  replaceRange: vscode.Range;
-  isLinked: boolean;
-  endMarkerLine: number | null;
-  prompt: string;
-  indent: string;
-  commentToken: string;
-  rawLines: string[];
-}
-
-const HASH_LANGUAGES = new Set([
-  'python',
-  'shellscript',
-  'bash',
-  'ruby',
-  'yaml',
-  'dockerfile',
-  'powershell',
-  'toml',
-  'gdscript',
-  'perl',
-  'r'
-]);
-
-const DASH_LANGUAGES = new Set([
-  'sql',
-  'lua',
-  'haskell',
-  'ada'
-]);
+import {
+  BlockInfo,
+  BlockState,
+  blockEnd,
+  blockState,
+  bodyLines,
+  findBlocks,
+  getCommentToken
+} from './core/blocks';
 
 /**
- * Resolves the single-line comment prefix for the given VS Code language ID.
+ * Editor-facing view of a Lugus block: the pure BlockInfo plus VS Code ranges.
+ * All parsing lives in core/blocks.ts; this file only adapts it to TextDocument.
  */
-export function getCommentToken(languageId: string): string {
-  if (HASH_LANGUAGES.has(languageId)) {
-    return '#';
-  }
-  if (DASH_LANGUAGES.has(languageId)) {
-    return '--';
-  }
-  return '//';
+export interface CommentBlock extends BlockInfo {
+  token: string;
+  state: BlockState;
+  /** Implementation lines between the rule and the marker. */
+  body: string[];
+  /** Rule lines only. */
+  ruleRange: vscode.Range;
+  /** The whole block: rule lines, body and marker. */
+  fullRange: vscode.Range;
+  /** Exact current text of the whole block, used to detect concurrent edits. */
+  snapshot: string;
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function documentLines(document: vscode.TextDocument): string[] {
+  const lines: string[] = new Array(document.lineCount);
+  for (let i = 0; i < document.lineCount; i++) {
+    lines[i] = document.lineAt(i).text;
+  }
+  return lines;
 }
 
-function buildPatterns(token: string): { promptPattern: RegExp; endMarkerPattern: RegExp } {
-  const escaped = escapeRegex(token);
-  return {
-    promptPattern: new RegExp(`^(\\s*)${escaped}>\\s?(.*)$`),
-    endMarkerPattern: new RegExp(`^\\s*${escaped}\\s*</lugus>\\s*$`)
-  };
-}
-
-/**
- * Formats the closing marker line for a linked Lugus block.
- */
-export function formatEndMarker(indent: string, commentToken: string): string {
-  return `${indent}${commentToken} </lugus>`;
-}
-
-/**
- * Extracts the pseudocode block at the given line.
- * Works when the cursor is on a prompt line, inside linked generated code,
- * or on the closing marker line.
- */
-export function extractCommentBlock(
-  document: vscode.TextDocument,
-  cursorLine: number
-): CommentBlock | null {
-  if (cursorLine < 0 || cursorLine >= document.lineCount) {
-    return null;
-  }
-
-  const token = getCommentToken(document.languageId);
-  const { promptPattern, endMarkerPattern } = buildPatterns(token);
-  const currentText = document.lineAt(cursorLine).text;
-
-  // Case 1: Cursor is directly on a pseudocode prompt line.
-  if (promptPattern.test(currentText)) {
-    return buildBlockFromPromptLine(document, cursorLine, token, promptPattern, endMarkerPattern);
-  }
-
-  // Case 2: Cursor is on the closing marker or inside linked generated code.
-  let endMarkerLine: number | null = null;
-  if (endMarkerPattern.test(currentText)) {
-    endMarkerLine = cursorLine;
-  } else {
-    for (let i = cursorLine + 1; i < document.lineCount; i++) {
-      const text = document.lineAt(i).text;
-      if (promptPattern.test(text)) {
-        break;
-      }
-      if (endMarkerPattern.test(text)) {
-        endMarkerLine = i;
-        break;
-      }
-    }
-  }
-
-  if (endMarkerLine === null) {
-    return null;
-  }
-
-  // Scan upward to find the opening prompt block paired with this closing marker.
-  let promptLine: number | null = null;
-  for (let i = Math.min(cursorLine, endMarkerLine) - 1; i >= 0; i--) {
-    const text = document.lineAt(i).text;
-    if (endMarkerPattern.test(text)) {
-      return null;
-    }
-    if (promptPattern.test(text)) {
-      promptLine = i;
-      break;
-    }
-  }
-
-  if (promptLine === null) {
-    return null;
-  }
-
-  return buildBlockFromPromptLine(document, promptLine, token, promptPattern, endMarkerPattern);
-}
-
-function buildBlockFromPromptLine(
-  document: vscode.TextDocument,
-  anchorLine: number,
+function toCommentBlock(
+  lines: string[],
   token: string,
-  promptPattern: RegExp,
-  endMarkerPattern: RegExp
+  info: BlockInfo
 ): CommentBlock {
-  let startLine = anchorLine;
-  while (startLine > 0 && promptPattern.test(document.lineAt(startLine - 1).text)) {
-    startLine--;
-  }
-
-  let endCommentLine = anchorLine;
-  while (
-    endCommentLine < document.lineCount - 1 &&
-    promptPattern.test(document.lineAt(endCommentLine + 1).text)
-  ) {
-    endCommentLine++;
-  }
-
-  const rawLines: string[] = [];
-  let indent = '';
-
-  for (let i = startLine; i <= endCommentLine; i++) {
-    const match = document.lineAt(i).text.match(promptPattern);
-    if (match) {
-      if (i === startLine) {
-        indent = match[1];
-      }
-      rawLines.push(match[2].trim());
-    }
-  }
-
-  // Scan downward to check if this prompt block already has a closing marker.
-  let endMarkerLine: number | null = null;
-  for (let i = endCommentLine + 1; i < document.lineCount; i++) {
-    const text = document.lineAt(i).text;
-    if (promptPattern.test(text)) {
-      break;
-    }
-    if (endMarkerPattern.test(text)) {
-      endMarkerLine = i;
-      break;
-    }
-  }
-
-  const commentRange = new vscode.Range(
-    new vscode.Position(startLine, 0),
-    document.lineAt(endCommentLine).range.end
-  );
-
-  const replaceRange =
-    endMarkerLine !== null
-      ? new vscode.Range(
-          new vscode.Position(startLine, 0),
-          document.lineAt(endMarkerLine).range.end
-        )
-      : commentRange;
-
+  const body = bodyLines(lines, info);
+  const end = blockEnd(info);
+  const fullRange = new vscode.Range(info.promptStart, 0, end, lines[end].length);
   return {
-    commentRange,
-    replaceRange,
-    isLinked: endMarkerLine !== null,
-    endMarkerLine,
-    prompt: rawLines.join('\n'),
-    indent,
-    commentToken: token,
-    rawLines
+    ...info,
+    token,
+    body,
+    state: blockState(info, body),
+    ruleRange: new vscode.Range(info.promptStart, 0, info.promptEnd, lines[info.promptEnd].length),
+    fullRange,
+    snapshot: lines.slice(info.promptStart, end + 1).join('\n')
   };
 }
 
-/**
- * Scans the entire document for Lugus pseudocode blocks (used by CodeLens).
- */
-export function findAllCommentBlocks(document: vscode.TextDocument): CommentBlock[] {
+export function getBlocks(document: vscode.TextDocument): CommentBlock[] {
+  const lines = documentLines(document);
   const token = getCommentToken(document.languageId);
-  const { promptPattern, endMarkerPattern } = buildPatterns(token);
-  const blocks: CommentBlock[] = [];
+  return findBlocks(lines, token).map((info) => toCommentBlock(lines, token, info));
+}
 
-  let line = 0;
-  while (line < document.lineCount) {
-    if (promptPattern.test(document.lineAt(line).text)) {
-      const block = buildBlockFromPromptLine(document, line, token, promptPattern, endMarkerPattern);
-      blocks.push(block);
-      line = block.replaceRange.end.line + 1;
-    } else {
-      line++;
-    }
+/** Block containing `line` (rule, body or marker), if any. */
+export function getBlockAt(document: vscode.TextDocument, line: number): CommentBlock | null {
+  if (line < 0 || line >= document.lineCount) {
+    return null;
   }
-
-  return blocks;
+  return getBlocks(document).find((b) => line >= b.promptStart && line <= blockEnd(b)) ?? null;
 }
 
 /**
- * Captures a narrow window of surrounding lines outside the block itself
- * so previous generated code inside a linked block does not pollute context.
+ * Finds the block again after an async step (network call, diff review).
+ * The block may have moved because the user edited lines above it, but its
+ * own text must be exactly what we started from; otherwise we refuse to apply.
+ */
+export function relocateBlock(
+  document: vscode.TextDocument,
+  original: CommentBlock
+): CommentBlock | null {
+  if (document.isClosed) {
+    return null;
+  }
+  const candidates = getBlocks(document).filter((b) => b.snapshot === original.snapshot);
+  if (candidates.length === 0) {
+    return null;
+  }
+  candidates.sort(
+    (a, b) => Math.abs(a.promptStart - original.promptStart) - Math.abs(b.promptStart - original.promptStart)
+  );
+  return candidates[0];
+}
+
+/**
+ * Lines around the block (never inside it), so the current implementation is
+ * sent once, explicitly, instead of leaking into the context.
  */
 export function extractLocalContext(
   document: vscode.TextDocument,
@@ -232,26 +101,11 @@ export function extractLocalContext(
   if (contextLines <= 0) {
     return { before: '', after: '' };
   }
-
-  const beforeStart = Math.max(0, block.replaceRange.start.line - contextLines);
-  const beforeRange = new vscode.Range(
-    new vscode.Position(beforeStart, 0),
-    new vscode.Position(block.replaceRange.start.line, 0)
-  );
-
-  let after = '';
-  if (block.replaceRange.end.line < document.lineCount - 1) {
-    const afterStart = block.replaceRange.end.line + 1;
-    const afterEnd = Math.min(document.lineCount - 1, block.replaceRange.end.line + contextLines);
-    const afterRange = new vscode.Range(
-      new vscode.Position(afterStart, 0),
-      document.lineAt(afterEnd).range.end
-    );
-    after = document.getText(afterRange);
-  }
-
+  const lines = documentLines(document);
+  const start = Math.max(0, block.promptStart - contextLines);
+  const end = blockEnd(block);
   return {
-    before: document.getText(beforeRange),
-    after
+    before: lines.slice(start, block.promptStart).join('\n'),
+    after: lines.slice(end + 1, Math.min(lines.length, end + 1 + contextLines)).join('\n')
   };
 }

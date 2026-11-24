@@ -2,9 +2,13 @@
 .vscode-test/**
 .git/**
 .gitignore
+.gitattributes
 src/**
+test/**
+out-test/**
+docs/**
 node_modules/**
-tsconfig.json
+tsconfig*.json
 **/*.map
 **/*.ts
 *.vsix

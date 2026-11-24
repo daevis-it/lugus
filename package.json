@@ -1,8 +1,8 @@
 {
   "name": "lugus",
   "displayName": "Lugus",
-  "description": "Master of all languages. Turn inline pseudocode comments into production code.",
-  "version": "0.1.0",
+  "description": "Keep the rule next to the code it implements. Lugus turns natural-language rules into code, updates that code when the rule changes, and tells you when the two drift apart.",
+  "version": "0.2.0",
   "publisher": "daevis-it",
   "license": "MIT",
   "repository": {
@@ -30,29 +30,54 @@
     "anthropic",
     "openai"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "lugus.translate",
-        "title": "Lugus: Translate / Recompile Pseudocode Block"
+        "title": "Translate / Update Block",
+        "category": "Lugus"
+      },
+      {
+        "command": "lugus.linkSelection",
+        "title": "Link Selected Code to a Rule",
+        "category": "Lugus",
+        "enablement": "editorHasSelection && !editorReadonly"
+      },
+      {
+        "command": "lugus.accept",
+        "title": "Accept Block As Aligned",
+        "category": "Lugus"
       },
       {
         "command": "lugus.detach",
-        "title": "Lugus: Detach Block (Keep Clean Code)"
+        "title": "Detach Block (Keep Code)",
+        "category": "Lugus"
       },
       {
         "command": "lugus.setApiKey",
-        "title": "Lugus: Set API Key"
+        "title": "Set API Key",
+        "category": "Lugus"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "lugus.linkSelection",
+          "when": "editorHasSelection && !editorReadonly",
+          "group": "1_modification@90"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "lugus.translate",
         "key": "ctrl+alt+enter",
         "mac": "cmd+alt+enter",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus && !editorReadonly"
       }
     ],
     "configuration": {
@@ -60,7 +85,12 @@
       "properties": {
         "lugus.provider": {
           "type": "string",
-          "enum": ["anthropic", "openai", "ollama", "custom"],
+          "enum": [
+            "anthropic",
+            "openai",
+            "ollama",
+            "custom"
+          ],
           "enumDescriptions": [
             "Anthropic Claude API (https://api.anthropic.com/v1)",
             "OpenAI API (https://api.openai.com/v1)",
@@ -82,9 +112,13 @@
         },
         "lugus.blockMode": {
           "type": "string",
-          "enum": ["linked", "replace", "comment"],
+          "enum": [
+            "linked",
+            "replace",
+            "comment"
+          ],
           "enumDescriptions": [
-            "Keep the pseudocode block linked above the generated code with an end marker so you can edit and recompile it anytime.",
+            "Keep the rule above the code with a fingerprinted end marker, so Lugus can detect drift and update the code when the rule changes.",
             "Replace the pseudocode block directly with the generated code (one-shot).",
             "Convert the pseudocode block into standard static comments above the generated code."
           ],
@@ -94,7 +128,7 @@
         "lugus.enableCodeLens": {
           "type": "boolean",
           "default": true,
-          "description": "Show subtle clickable CodeLens actions exclusively above Lugus pseudocode blocks."
+          "description": "Show block status and actions (Translate, Update Code, Accept, Detach) above Lugus rules."
         },
         "lugus.contextLines": {
           "type": "number",
@@ -109,9 +143,9 @@
         },
         "lugus.timeoutMs": {
           "type": "number",
-          "default": 30000,
+          "default": 60000,
           "minimum": 3000,
-          "description": "Request timeout in milliseconds."
+          "description": "Request timeout in milliseconds. Local models may need more."
         }
       }
     }
@@ -121,7 +155,10 @@
     "watch": "npm run build -- --watch",
     "package": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "vscode:prepublish": "npm run package",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "pretest": "tsc -p tsconfig.test.json",
+    "test": "cd out-test && node --test",
+    "test:smoke": "npm run build && node test/smoke/smoke.js dist/extension.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

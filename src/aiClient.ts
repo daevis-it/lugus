@@ -1,3 +1,6 @@
+import { BuiltPrompt } from './core/prompts';
+import { cleanModelOutput } from './core/text';
+
 export type Provider = 'anthropic' | 'openai' | 'ollama' | 'custom';
 
 export interface ResolvedProviderConfig {
@@ -7,291 +10,176 @@ export interface ResolvedProviderConfig {
   requiresApiKey: boolean;
 }
 
-export interface TranslationRequest {
-  provider: Provider;
-  baseUrl: string;
+export interface CompletionRequest {
+  config: ResolvedProviderConfig;
   apiKey?: string;
-  model: string;
-  language: string;
-  prompt: string;
-  contextBefore: string;
-  contextAfter: string;
-  projectRules?: string | null;
+  prompt: BuiltPrompt;
   timeoutMs: number;
+  signal?: AbortSignal;
 }
 
-interface OpenAICompletionResponse {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
-  error?: {
-    message?: string;
-  };
-}
-
-interface AnthropicMessageResponse {
-  content?: Array<{
-    type: string;
-    text?: string;
-  }>;
-  error?: {
-    message?: string;
-  };
-}
+const MAX_OUTPUT_TOKENS = 8192;
+const ANTHROPIC_API_VERSION = '2026-10-21';
 
 const PROVIDER_DEFAULTS: Record<Exclude<Provider, 'custom'>, { baseUrl: string; model: string }> = {
-  anthropic: {
-    baseUrl: 'https://api.anthropic.com/v1',
-    model: 'claude-haiku-4-5'
-  },
-  openai: {
-    baseUrl: 'https://api.openai.com/v1',
-    model: 'gpt-4o-mini'
-  },
-  ollama: {
-    baseUrl: 'http://localhost:11434/v1',
-    model: 'qwen2.5-coder:7b'
-  }
+  anthropic: { baseUrl: 'https://api.anthropic.com/v1', model: 'claude-haiku-4-5' },
+  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  ollama: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b' }
 };
 
-/**
- * Resolves and validates endpoint and model settings for the selected provider.
- */
+const LOCAL_URL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
+
+/** Resolves and validates endpoint and model settings for the selected provider. */
 export function resolveProviderConfig(
   provider: Provider,
   baseUrlOverride: string,
   modelOverride: string
 ): ResolvedProviderConfig {
-  const trimmedUrl = baseUrlOverride.trim().replace(/\/+$/, '');
-  const trimmedModel = modelOverride.trim();
+  const url = baseUrlOverride.trim().replace(/\/+$/, '');
+  const model = modelOverride.trim();
 
   if (provider === 'custom') {
-    if (!trimmedUrl) {
+    if (!url) {
       throw new Error("Provider is set to 'custom', but 'lugus.baseUrl' is empty.");
     }
-    if (!trimmedModel) {
+    if (!model) {
       throw new Error("Provider is set to 'custom', but 'lugus.model' is empty.");
     }
-    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(trimmedUrl);
-    return {
-      provider,
-      baseUrl: trimmedUrl,
-      model: trimmedModel,
-      requiresApiKey: !isLocal
-    };
+    return { provider, baseUrl: url, model, requiresApiKey: !LOCAL_URL.test(url) };
   }
 
   const defaults = PROVIDER_DEFAULTS[provider];
-  const baseUrl = trimmedUrl || defaults.baseUrl;
-  const model = trimmedModel || defaults.model;
-  const isLocal =
-    provider === 'ollama' ||
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(baseUrl);
-
+  if (!defaults) {
+    throw new Error(`Unknown provider '${provider}'.`);
+  }
+  const baseUrl = url || defaults.baseUrl;
   return {
     provider,
     baseUrl,
-    model,
-    requiresApiKey: !isLocal
+    model: model || defaults.model,
+    requiresApiKey: provider !== 'ollama' && !LOCAL_URL.test(baseUrl)
   };
 }
 
-/**
- * Catches common API key / provider mismatches before issuing a network call.
- */
+/** Catches common API key / provider mismatches before any network call. */
 export function validateApiKeyForProvider(provider: Provider, apiKey: string): void {
   if (provider === 'openai' && apiKey.startsWith('sk-ant-')) {
     throw new Error(
-      "Detected an Anthropic API key (sk-ant-...) while 'lugus.provider' is set to 'openai'. Switch provider to 'anthropic' in Settings."
+      "Detected an Anthropic API key (sk-ant-...) while 'lugus.provider' is 'openai'. Switch the provider to 'anthropic' in Settings."
     );
   }
   if (provider === 'anthropic' && apiKey.startsWith('sk-') && !apiKey.startsWith('sk-ant-')) {
     throw new Error(
-      "Detected an OpenAI-style key while 'lugus.provider' is set to 'anthropic'. Switch provider to 'openai' or update your API key."
+      "Detected an OpenAI-style key while 'lugus.provider' is 'anthropic'. Switch the provider to 'openai' or update the API key."
     );
   }
 }
 
-/**
- * Sends the pseudocode instruction, optional project rules, and local context
- * to either Anthropic's Messages API or any OpenAI-compatible endpoint.
- */
-export async function translatePseudocode(req: TranslationRequest): Promise<string> {
-  const systemLines = [
-    `You are Lugus, a deterministic translator from natural-language pseudocode to ${req.language}.`,
-    `The user's instruction may be written in any human language. Translate its exact logic into idiomatic ${req.language} code.`,
-    `Strict rules:`,
-    `1. Output ONLY executable ${req.language} code matching the instruction.`,
-    `2. Do NOT wrap the output in markdown code fences (\`\`\`), and do NOT include explanations or prose.`,
-    `3. Do NOT add imports/using statements or outer class/function wrappers unless explicitly requested.`,
-    `4. Start at column 0 (no shared base indentation); preserve only internal block indentation.`,
-    `5. Match variable names and coding style from the surrounding local context when provided.`
-  ];
-
-  if (req.projectRules) {
-    systemLines.push(
-      '',
-      'Project-specific constraints from .lugusrc (follow strictly unless contradicted by the instruction):',
-      req.projectRules
-    );
+/** Sends the prompt and returns clean, dedented code. */
+export async function requestCode(req: CompletionRequest): Promise<string> {
+  const useAnthropic =
+    req.config.provider === 'anthropic' || /(^|\.)anthropic\.com/i.test(hostOf(req.config.baseUrl));
+  const raw = useAnthropic ? await callAnthropic(req) : await callOpenAICompatible(req);
+  const code = cleanModelOutput(raw);
+  if (!code.trim()) {
+    throw new Error('The model returned an empty response.');
   }
-
-  const systemPrompt = systemLines.join('\n');
-
-  const userSections: string[] = [];
-  if (req.contextBefore.trim()) {
-    userSections.push(`--- CONTEXT BEFORE ---\n${req.contextBefore}`);
-  }
-  userSections.push(`--- INSTRUCTION (TARGET: ${req.language}) ---\n${req.prompt}`);
-  if (req.contextAfter.trim()) {
-    userSections.push(`--- CONTEXT AFTER ---\n${req.contextAfter}`);
-  }
-  const userPrompt = userSections.join('\n\n');
-
-  const useAnthropicProtocol =
-    req.provider === 'anthropic' || req.baseUrl.includes('anthropic.com');
-
-  const rawContent = useAnthropicProtocol
-    ? await callAnthropic(req, systemPrompt, userPrompt)
-    : await callOpenAICompatible(req, systemPrompt, userPrompt);
-
-  return cleanModelOutput(rawContent);
+  return code;
 }
 
-async function callAnthropic(
-  req: TranslationRequest,
-  systemPrompt: string,
-  userPrompt: string
-): Promise<string> {
-  const endpoint = `${req.baseUrl}/messages`;
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
 
-  const response = await fetch(endpoint, {
+function requestSignal(req: CompletionRequest): AbortSignal {
+  const timeout = AbortSignal.timeout(req.timeoutMs);
+  return req.signal ? AbortSignal.any([timeout, req.signal]) : timeout;
+}
+
+async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const snippet = text.trim().slice(0, 160);
+    throw new Error(`Invalid response from the endpoint (HTTP ${response.status})${snippet ? `: ${snippet}` : '.'}`);
+  }
+}
+
+interface AnthropicResponse {
+  content?: Array<{ type: string; text?: string }>;
+  stop_reason?: string;
+  error?: { message?: string };
+}
+
+async function callAnthropic(req: CompletionRequest): Promise<string> {
+  const response = await fetch(`${req.config.baseUrl}/messages`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': req.apiKey ?? '',
-      'anthropic-version': '2026-10-21'
+      'anthropic-version': ANTHROPIC_API_VERSION
     },
-    signal: AbortSignal.timeout(req.timeoutMs),
+    signal: requestSignal(req),
     body: JSON.stringify({
-      model: req.model,
-      max_tokens: 2048,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }]
+      model: req.config.model,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      system: req.prompt.system,
+      messages: [{ role: 'user', content: req.prompt.user }]
     })
   });
 
-  let data: AnthropicMessageResponse;
-  try {
-    data = (await response.json()) as AnthropicMessageResponse;
-  } catch {
-    throw new Error(`Invalid JSON response (HTTP ${response.status}).`);
-  }
-
+  const data = await readJson<AnthropicResponse>(response);
   if (!response.ok) {
-    const errMsg = data?.error?.message || `HTTP ${response.status}`;
-    throw new Error(`Anthropic API error: ${errMsg}`);
+    throw new Error(`Anthropic API error: ${data.error?.message || `HTTP ${response.status}`}`);
   }
-
-  const textBlock = data.content?.find((block) => block.type === 'text' && block.text);
-  if (!textBlock?.text) {
-    throw new Error('Model returned an empty response.');
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error('The model output was cut off (token limit). Nothing was changed; split the block into smaller rules.');
   }
-
-  return textBlock.text;
+  if (data.stop_reason === 'refusal') {
+    throw new Error('The model declined this request. Nothing was changed.');
+  }
+  return (data.content ?? [])
+    .filter((block) => block.type === 'text' && block.text)
+    .map((block) => block.text)
+    .join('');
 }
 
-async function callOpenAICompatible(
-  req: TranslationRequest,
-  systemPrompt: string,
-  userPrompt: string
-): Promise<string> {
-  const endpoint = `${req.baseUrl}/chat/completions`;
+interface OpenAIResponse {
+  choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
+  error?: { message?: string };
+}
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
-  };
+async function callOpenAICompatible(req: CompletionRequest): Promise<string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (req.apiKey) {
     headers['Authorization'] = `Bearer ${req.apiKey}`;
   }
 
-  const response = await fetch(endpoint, {
+  const response = await fetch(`${req.config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers,
-    signal: AbortSignal.timeout(req.timeoutMs),
+    signal: requestSignal(req),
     body: JSON.stringify({
-      model: req.model,
+      model: req.config.model,
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
+        { role: 'system', content: req.prompt.system },
+        { role: 'user', content: req.prompt.user }
       ]
     })
   });
 
-  let data: OpenAICompletionResponse;
-  try {
-    data = (await response.json()) as OpenAICompletionResponse;
-  } catch {
-    throw new Error(`Invalid JSON response (HTTP ${response.status}).`);
-  }
-
+  const data = await readJson<OpenAIResponse>(response);
   if (!response.ok) {
-    const errMsg = data?.error?.message || `HTTP ${response.status}`;
-    throw new Error(`API error: ${errMsg}`);
+    throw new Error(`API error: ${data.error?.message || `HTTP ${response.status}`}`);
   }
-
-  const rawContent = data.choices?.[0]?.message?.content;
-  if (!rawContent) {
-    throw new Error('Model returned an empty response.');
+  const choice = data.choices?.[0];
+  if (choice?.finish_reason === 'length') {
+    throw new Error('The model output was cut off (token limit). Nothing was changed; split the block into smaller rules.');
   }
-
-  return rawContent;
-}
-
-/**
- * Strips accidental markdown fences and normalizes shared leading indentation.
- */
-function cleanModelOutput(raw: string): string {
-  let cleaned = raw.replace(/\r\n/g, '\n').trim();
-
-  const fenceMatch = cleaned.match(/^```[a-zA-Z0-9_+-]*\n([\s\S]*?)\n?```$/);
-  if (fenceMatch) {
-    cleaned = fenceMatch[1];
-  }
-
-  cleaned = cleaned.replace(/^\n+|\n+$/g, '');
-  return dedentCommonIndent(cleaned);
-}
-
-function dedentCommonIndent(code: string): string {
-  const lines = code.split('\n');
-  const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
-  if (nonEmptyLines.length === 0) {
-    return code;
-  }
-
-  const minIndent = Math.min(
-    ...nonEmptyLines.map((line) => {
-      const match = line.match(/^(\s*)/);
-      return match ? match[1].length : 0;
-    })
-  );
-
-  if (minIndent === 0) {
-    return code;
-  }
-
-  return lines.map((line) => line.slice(minIndent)).join('\n');
-}
-
-/**
- * Applies the cursor block's base indentation to every non-empty line.
- */
-export function applyIndentation(code: string, baseIndent: string): string {
-  return code
-    .split('\n')
-    .map((line) => (line.trim().length > 0 ? `${baseIndent}${line}` : ''))
-    .join('\n');
+  return choice?.message?.content ?? '';
 }
