@@ -1,0 +1,107 @@
+{
+  "name": "lugus",
+  "displayName": "Lugus",
+  "description": "Master of all languages. Turn inline pseudocode comments into production code.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "pseudocode",
+    "code-generation",
+    "inline",
+    "byok",
+    "ollama",
+    "anthropic",
+    "openai"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "lugus.translate",
+        "title": "Lugus: Translate Pseudocode Block"
+      },
+      {
+        "command": "lugus.setApiKey",
+        "title": "Lugus: Set API Key"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "lugus.translate",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Lugus",
+      "properties": {
+        "lugus.provider": {
+          "type": "string",
+          "enum": ["anthropic", "openai", "ollama", "custom"],
+          "enumDescriptions": [
+            "Anthropic Claude API (https://api.anthropic.com/v1)",
+            "OpenAI API (https://api.openai.com/v1)",
+            "Local Ollama server (http://localhost:11434/v1)",
+            "Custom OpenAI-compatible endpoint (OpenRouter, Groq, LM Studio, DeepSeek, etc.)"
+          ],
+          "default": "anthropic",
+          "description": "AI provider used for pseudocode translation."
+        },
+        "lugus.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model override. Leave empty to use the default model for the selected provider (e.g. claude-haiku-4-5, gpt-4o-mini, qwen2.5-coder:7b)."
+        },
+        "lugus.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional base URL override. Required when provider is set to 'custom'."
+        },
+        "lugus.keepComment": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, converts the pseudocode block into standard comments above the generated code."
+        },
+        "lugus.contextLines": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "description": "Number of surrounding lines (above and below) sent as local context. Set to 0 to disable."
+        },
+        "lugus.languageOverride": {
+          "type": "string",
+          "default": "",
+          "description": "Force a specific target language (leave empty to auto-detect from the active file)."
+        },
+        "lugus.timeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 3000,
+          "description": "Request timeout in milliseconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "watch": "npm run build -- --watch",
+    "package": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}
