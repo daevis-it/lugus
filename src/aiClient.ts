@@ -16,6 +16,7 @@ export interface TranslationRequest {
   prompt: string;
   contextBefore: string;
   contextAfter: string;
+  projectRules?: string | null;
   timeoutMs: number;
 }
 
@@ -114,11 +115,11 @@ export function validateApiKeyForProvider(provider: Provider, apiKey: string): v
 }
 
 /**
- * Sends the pseudocode instruction and optional local context to either
- * Anthropic's Messages API or any OpenAI-compatible `/chat/completions` endpoint.
+ * Sends the pseudocode instruction, optional project rules, and local context
+ * to either Anthropic's Messages API or any OpenAI-compatible endpoint.
  */
 export async function translatePseudocode(req: TranslationRequest): Promise<string> {
-  const systemPrompt = [
+  const systemLines = [
     `You are Lugus, a deterministic translator from natural-language pseudocode to ${req.language}.`,
     `The user's instruction may be written in any human language. Translate its exact logic into idiomatic ${req.language} code.`,
     `Strict rules:`,
@@ -127,7 +128,17 @@ export async function translatePseudocode(req: TranslationRequest): Promise<stri
     `3. Do NOT add imports/using statements or outer class/function wrappers unless explicitly requested.`,
     `4. Start at column 0 (no shared base indentation); preserve only internal block indentation.`,
     `5. Match variable names and coding style from the surrounding local context when provided.`
-  ].join('\n');
+  ];
+
+  if (req.projectRules) {
+    systemLines.push(
+      '',
+      'Project-specific constraints from .lugusrc (follow strictly unless contradicted by the instruction):',
+      req.projectRules
+    );
+  }
+
+  const systemPrompt = systemLines.join('\n');
 
   const userSections: string[] = [];
   if (req.contextBefore.trim()) {
@@ -161,13 +172,12 @@ async function callAnthropic(
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': req.apiKey ?? '',
-      'anthropic-version': '2023-06-01'
+      'anthropic-version': '2026-10-21'
     },
     signal: AbortSignal.timeout(req.timeoutMs),
     body: JSON.stringify({
       model: req.model,
       max_tokens: 2048,
-      temperature: 0.1,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }]
     })
@@ -213,7 +223,6 @@ async function callOpenAICompatible(
     signal: AbortSignal.timeout(req.timeoutMs),
     body: JSON.stringify({
       model: req.model,
-      temperature: 0.1,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }

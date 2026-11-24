@@ -1,5 +1,9 @@
 import * as vscode from 'vscode';
-import { extractCommentBlock, extractLocalContext } from './commentParser';
+import {
+  extractCommentBlock,
+  extractLocalContext,
+  formatEndMarker
+} from './commentParser';
 import {
   Provider,
   resolveProviderConfig,
@@ -7,6 +11,10 @@ import {
   translatePseudocode,
   applyIndentation
 } from './aiClient';
+import { loadProjectRules } from './projectRules';
+import { LugusCodeLensProvider } from './codeLensProvider';
+
+type BlockMode = 'linked' | 'replace' | 'comment';
 
 const API_KEY_SECRET = 'lugus.apiKey';
 
@@ -16,6 +24,18 @@ export function activate(context: vscode.ExtensionContext): void {
       contentText: '  ⟳ translating...',
       color: new vscode.ThemeColor('editorCodeLens.foreground'),
       fontStyle: 'italic'
+    }
+  });
+
+  const codeLensProvider = new LugusCodeLensProvider();
+  const codeLensRegistration = vscode.languages.registerCodeLensProvider(
+    [{ scheme: 'file' }, { scheme: 'untitled' }],
+    codeLensProvider
+  );
+
+  const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration('lugus.enableCodeLens')) {
+      codeLensProvider.refresh();
     }
   });
 
@@ -40,111 +60,176 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  const translateCmd = vscode.commands.registerCommand('lugus.translate', async () => {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      return;
-    }
-
-    const document = editor.document;
-    const cursorLine = editor.selection.active.line;
-    const block = extractCommentBlock(document, cursorLine);
-
-    if (!block) {
-      vscode.window.setStatusBarMessage(
-        'Lugus: place the cursor on a pseudocode comment (e.g. //>, #>, -->).',
-        4000
-      );
-      return;
-    }
-
-    const config = vscode.workspace.getConfiguration('lugus');
-    const provider = config.get<Provider>('provider', 'anthropic');
-    const baseUrlOverride = config.get<string>('baseUrl', '');
-    const modelOverride = config.get<string>('model', '');
-    const keepComment = config.get<boolean>('keepComment', false);
-    const contextLines = config.get<number>('contextLines', 20);
-    const languageOverride = config.get<string>('languageOverride', '').trim();
-    const timeoutMs = config.get<number>('timeoutMs', 30000);
-    const targetLanguage = languageOverride || document.languageId;
-
-    let resolved;
-    try {
-      resolved = resolveProviderConfig(provider, baseUrlOverride, modelOverride);
-    } catch (err: unknown) {
-      vscode.window.showErrorMessage(`Lugus: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-
-    let apiKey = await context.secrets.get(API_KEY_SECRET);
-
-    if (resolved.requiresApiKey && !apiKey) {
-      const choice = await vscode.window.showWarningMessage(
-        `Lugus: no API key configured for provider '${resolved.provider}'.`,
-        'Set API Key'
-      );
-      if (choice === 'Set API Key') {
-        await vscode.commands.executeCommand('lugus.setApiKey');
-        apiKey = await context.secrets.get(API_KEY_SECRET);
-      }
-      if (!apiKey) {
+  const translateCmd = vscode.commands.registerCommand(
+    'lugus.translate',
+    async (targetLine?: number) => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
         return;
       }
-    }
 
-    if (apiKey) {
+      const document = editor.document;
+      const line = typeof targetLine === 'number' ? targetLine : editor.selection.active.line;
+      const block = extractCommentBlock(document, line);
+
+      if (!block) {
+        vscode.window.setStatusBarMessage(
+          'Lugus: place the cursor on a pseudocode comment or inside a linked block.',
+          4000
+        );
+        return;
+      }
+
+      const config = vscode.workspace.getConfiguration('lugus');
+      const provider = config.get<Provider>('provider', 'anthropic');
+      const baseUrlOverride = config.get<string>('baseUrl', '');
+      const modelOverride = config.get<string>('model', '');
+      const blockMode = config.get<BlockMode>('blockMode', 'linked');
+      const contextLines = config.get<number>('contextLines', 20);
+      const languageOverride = config.get<string>('languageOverride', '').trim();
+      const timeoutMs = config.get<number>('timeoutMs', 30000);
+      const targetLanguage = languageOverride || document.languageId;
+
+      let resolved;
       try {
-        validateApiKeyForProvider(resolved.provider, apiKey);
+        resolved = resolveProviderConfig(provider, baseUrlOverride, modelOverride);
       } catch (err: unknown) {
         vscode.window.showErrorMessage(`Lugus: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
+
+      let apiKey = await context.secrets.get(API_KEY_SECRET);
+
+      if (resolved.requiresApiKey && !apiKey) {
+        const choice = await vscode.window.showWarningMessage(
+          `Lugus: no API key configured for provider '${resolved.provider}'.`,
+          'Set API Key'
+        );
+        if (choice === 'Set API Key') {
+          await vscode.commands.executeCommand('lugus.setApiKey');
+          apiKey = await context.secrets.get(API_KEY_SECRET);
+        }
+        if (!apiKey) {
+          return;
+        }
+      }
+
+      if (apiKey) {
+        try {
+          validateApiKeyForProvider(resolved.provider, apiKey);
+        } catch (err: unknown) {
+          vscode.window.showErrorMessage(`Lugus: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+      }
+
+      const decorationRange = new vscode.Range(block.commentRange.end, block.commentRange.end);
+      editor.setDecorations(loadingDecoration, [decorationRange]);
+
+      try {
+        const [localContext, projectRules] = await Promise.all([
+          Promise.resolve(extractLocalContext(document, block, contextLines)),
+          loadProjectRules(document)
+        ]);
+
+        const generated = await translatePseudocode({
+          provider: resolved.provider,
+          baseUrl: resolved.baseUrl,
+          apiKey,
+          model: resolved.model,
+          language: targetLanguage,
+          prompt: block.prompt,
+          contextBefore: localContext.before,
+          contextAfter: localContext.after,
+          projectRules,
+          timeoutMs
+        });
+
+        const indentedCode = applyIndentation(generated, block.indent);
+        let finalText = indentedCode;
+
+        if (blockMode === 'linked') {
+          const headerComments = block.rawLines
+            .map((rawLine) => `${block.indent}${block.commentToken}> ${rawLine}`)
+            .join('\n');
+          const endMarker = formatEndMarker(block.indent, block.commentToken);
+          finalText = `${headerComments}\n${indentedCode}\n${endMarker}`;
+        } else if (blockMode === 'comment') {
+          const preservedComments = block.rawLines
+            .map((rawLine) => `${block.indent}${block.commentToken} ${rawLine}`)
+            .join('\n');
+          finalText = `${preservedComments}\n${indentedCode}`;
+        }
+
+        await editor.edit((editBuilder) => {
+          editBuilder.replace(block.replaceRange, finalText);
+        });
+
+        codeLensProvider.refresh();
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error && err.name === 'TimeoutError'
+            ? `Request timed out after ${timeoutMs}ms.`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+
+        vscode.window.showErrorMessage(`Lugus: ${message}`);
+      } finally {
+        editor.setDecorations(loadingDecoration, []);
+      }
     }
+  );
 
-    const decorationRange = new vscode.Range(block.range.end, block.range.end);
-    editor.setDecorations(loadingDecoration, [decorationRange]);
+  const detachCmd = vscode.commands.registerCommand(
+    'lugus.detach',
+    async (targetLine?: number) => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
 
-    try {
-      const localContext = extractLocalContext(document, block.range, contextLines);
-      const generated = await translatePseudocode({
-        provider: resolved.provider,
-        baseUrl: resolved.baseUrl,
-        apiKey,
-        model: resolved.model,
-        language: targetLanguage,
-        prompt: block.prompt,
-        contextBefore: localContext.before,
-        contextAfter: localContext.after,
-        timeoutMs
-      });
+      const document = editor.document;
+      const line = typeof targetLine === 'number' ? targetLine : editor.selection.active.line;
+      const block = extractCommentBlock(document, line);
 
-      let finalText = applyIndentation(generated, block.indent);
+      if (!block || !block.isLinked || block.endMarkerLine === null) {
+        vscode.window.setStatusBarMessage(
+          'Lugus: cursor is not on a linked block to detach.',
+          4000
+        );
+        return;
+      }
 
-      if (keepComment) {
-        const preservedComments = block.rawLines
-          .map((line) => `${block.indent}${block.commentToken} ${line}`)
-          .join('\n');
-        finalText = `${preservedComments}\n${finalText}`;
+      const codeStartLine = block.commentRange.end.line + 1;
+      const codeEndLine = block.endMarkerLine - 1;
+
+      let cleanCode = '';
+      if (codeStartLine <= codeEndLine) {
+        const codeRange = new vscode.Range(
+          new vscode.Position(codeStartLine, 0),
+          document.lineAt(codeEndLine).range.end
+        );
+        cleanCode = document.getText(codeRange);
       }
 
       await editor.edit((editBuilder) => {
-        editBuilder.replace(block.range, finalText);
+        editBuilder.replace(block.replaceRange, cleanCode);
       });
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error && err.name === 'TimeoutError'
-          ? `Request timed out after ${timeoutMs}ms.`
-          : err instanceof Error
-            ? err.message
-            : String(err);
 
-      vscode.window.showErrorMessage(`Lugus: ${message}`);
-    } finally {
-      editor.setDecorations(loadingDecoration, []);
+      codeLensProvider.refresh();
     }
-  });
+  );
 
-  context.subscriptions.push(loadingDecoration, setKeyCmd, translateCmd);
+  context.subscriptions.push(
+    loadingDecoration,
+    codeLensProvider,
+    codeLensRegistration,
+    configListener,
+    setKeyCmd,
+    translateCmd,
+    detachCmd
+  );
 }
 
 export function deactivate(): void {}

@@ -3,7 +3,16 @@
   "displayName": "Lugus",
   "description": "Master of all languages. Turn inline pseudocode comments into production code.",
   "version": "0.1.0",
+  "publisher": "daevis-it",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daevis-it/lugus.git"
+  },
+  "homepage": "https://github.com/daevis-it/lugus#readme",
+  "bugs": {
+    "url": "https://github.com/daevis-it/lugus/issues"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -27,7 +36,11 @@
     "commands": [
       {
         "command": "lugus.translate",
-        "title": "Lugus: Translate Pseudocode Block"
+        "title": "Lugus: Translate / Recompile Pseudocode Block"
+      },
+      {
+        "command": "lugus.detach",
+        "title": "Lugus: Detach Block (Keep Clean Code)"
       },
       {
         "command": "lugus.setApiKey",
@@ -60,17 +73,28 @@
         "lugus.model": {
           "type": "string",
           "default": "",
-          "description": "Optional model override. Leave empty to use the default model for the selected provider (e.g. claude-haiku-4-5, gpt-4o-mini, qwen2.5-coder:7b)."
+          "description": "Optional model override. Leave empty to use the default model for the selected provider."
         },
         "lugus.baseUrl": {
           "type": "string",
           "default": "",
           "description": "Optional base URL override. Required when provider is set to 'custom'."
         },
-        "lugus.keepComment": {
+        "lugus.blockMode": {
+          "type": "string",
+          "enum": ["linked", "replace", "comment"],
+          "enumDescriptions": [
+            "Keep the pseudocode block linked above the generated code with an end marker so you can edit and recompile it anytime.",
+            "Replace the pseudocode block directly with the generated code (one-shot).",
+            "Convert the pseudocode block into standard static comments above the generated code."
+          ],
+          "default": "linked",
+          "description": "Controls how Lugus writes translated code back into the editor."
+        },
+        "lugus.enableCodeLens": {
           "type": "boolean",
-          "default": false,
-          "description": "When enabled, converts the pseudocode block into standard comments above the generated code."
+          "default": true,
+          "description": "Show subtle clickable CodeLens actions exclusively above Lugus pseudocode blocks."
         },
         "lugus.contextLines": {
           "type": "number",
@@ -96,6 +120,7 @@
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
     "watch": "npm run build -- --watch",
     "package": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "vscode:prepublish": "npm run package",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
