@@ -49,6 +49,10 @@
         "title": "Lugus: Accept Block As Aligned"
       },
       {
+        "command": "lugus.showDrifted",
+        "title": "Lugus: Show Blocks to Review"
+      },
+      {
         "command": "lugus.detach",
         "title": "Lugus: Detach Block (Keep Code)"
       },
@@ -140,24 +144,47 @@
           "default": 60000,
           "minimum": 3000,
           "description": "Request timeout in milliseconds. Local models may need more."
+        },
+        "lugus.driftSeverity": {
+          "type": "string",
+          "enum": [
+            "warning",
+            "information",
+            "hint",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Show drifted blocks as warnings in the editor and the Problems panel.",
+            "Show drifted blocks as information.",
+            "Show drifted blocks as faint hints in the editor only.",
+            "Do not report drift as diagnostics (CodeLens still shows the status)."
+          ],
+          "default": "warning",
+          "description": "How blocks whose rule and code no longer match are reported in the Problems panel."
         }
       }
     }
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
-    "watch": "npm run build -- --watch",
+    "build": "npm run build:ext && npm run build:cli",
+    "build:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "build:cli": "esbuild src/cli.ts --bundle --outfile=dist/cli.js --format=cjs --platform=node --target=node18 --banner:js=\"#!/usr/bin/env node\"",
+    "watch": "npm run build:ext -- --watch",
     "package": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "vscode:prepublish": "npm run package",
+    "prepare": "npm run build:cli",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "pretest": "tsc -p tsconfig.test.json",
     "test": "cd out-test && node --test",
-    "test:smoke": "npm run build && node test/smoke/smoke.js dist/extension.js"
+    "test:smoke": "npm run build:ext && esbuild src/core/blocks.ts --bundle --platform=node --format=cjs --outfile=out-test/smoke-core.js && node test/smoke/smoke.js dist/extension.js out-test/smoke-core.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.90.0",
     "esbuild": "^0.23.0",
     "typescript": "^5.5.0"
+  },
+  "bin": {
+    "lugus": "./dist/cli.js"
   }
 }

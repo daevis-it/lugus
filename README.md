@@ -57,6 +57,34 @@ From then on the block works like any other: the model is only called when you c
 - **Accept** records the current rule and code as aligned without calling the model. Use it after a hand edit the rule still describes, or after rewording a rule without changing its meaning.
 - **Detach** removes the rule and the marker and keeps the code. Undo restores them.
 
+### See every block that needs attention
+
+Drifted blocks appear in the **Problems** panel (as warnings by default; see `lugus.driftSeverity`) with **Update code** and **Accept** as quick fixes (**Ctrl+.**). Open files are re-checked as you type.
+
+Run **Lugus: Show Blocks to Review** to scan the whole workspace: you get the list of drifted and not-verified blocks, and selecting one opens it. Build and dependency folders (`node_modules`, `dist`, `bin`, `obj`, Unreal's `Intermediate`/`Saved`/`Binaries`, Unity's `Library`, `.godot`…) are skipped.
+
+### Check from the command line
+
+`lugus check` reports drift without VS Code, for pre-commit hooks and CI:
+
+```bash
+npm install -g github:daevis-it/lugus
+lugus check            # current folder; inside a git repo, ignored files are skipped
+lugus check src --json # specific folders or files, JSON output
+```
+
+```text
+src/Services/UserService.cs:42  rule changed  "Return the active users sorted by last login"
+lugus: 12 linked blocks checked, 1 drifted.
+```
+
+It exits with `0` when everything is aligned and `1` when a block has drifted. Old markers without fingerprints are listed as *not verified*; add `--strict` to fail on them too. As a git pre-commit hook (`.git/hooks/pre-commit`):
+
+```sh
+#!/bin/sh
+lugus check || { echo "Lugus: some rules and code are out of sync. Update or Accept them, or commit with --no-verify."; exit 1; }
+```
+
 ### Comment prefixes
 
 The prefix follows the file's VS Code language mode:
@@ -111,6 +139,7 @@ Each request sends the rule, the current code of the block (when updating), the 
 | `lugus.contextLines` | `20` | Lines of context sent from each side of the block. |
 | `lugus.languageOverride` | Active file language | Overrides the target language requested from the model. |
 | `lugus.timeoutMs` | `60000` | Request timeout in milliseconds. Raise it for slow local models. |
+| `lugus.driftSeverity` | `warning` | How drifted blocks appear in the Problems panel: `warning`, `information`, `hint` or `off`. Not-verified blocks are always reported as information. |
 
 ## Development
 
@@ -122,11 +151,14 @@ npm run build        # bundle to dist/
 npm test             # unit tests for the parser, fingerprints and prompts
 npm run test:smoke   # end-to-end run of the bundled extension on a mocked VS Code API
 npm run typecheck
+node dist/cli.js check
 ```
+
+CI runs all of the above on Linux and Windows for every push and pull request, then packages the `.vsix` as a build artifact.
 
 Press **F5** in VS Code to build and start an Extension Development Host. To create an installable package, run `npx @vscode/vsce package`.
 
-The parsing, fingerprint and prompt logic lives in `src/core/` and has no VS Code dependency. The rest of `src/` adapts it to the editor.
+The parsing, fingerprint, drift and prompt logic lives in `src/core/` and has no VS Code dependency. The extension (`src/extension.ts` and friends) and the CLI (`src/cli.ts`) are thin layers on top of it.
 
 ## Roadmap
 
@@ -135,8 +167,8 @@ The parsing, fingerprint and prompt logic lives in `src/core/` and has no VS Cod
 - [x] Link existing code to a rule
 - [x] Drift detection: rule and code fingerprints, block status, Accept
 - [x] Updates edit the current code minimally, always behind a diff review
+- [x] Drift in the Problems panel, workspace overview and `lugus check` CLI
 - [ ] Sidecar mode: keep rules in `.lugus/` instead of in the source, so shared code stays clean ([design](docs/design/sidecar-mode.md))
-- [ ] On-demand logic check for edge cases and null risks, with findings shown separately from the code
 
 ## License
 

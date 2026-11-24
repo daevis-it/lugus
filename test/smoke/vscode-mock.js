@@ -25,12 +25,22 @@ class EventEmitter {
 class ThemeColor { constructor(id) { this.id = id; } }
 class TabInputTextDiff {}
 class CodeLens { constructor(range, command) { this.range = range; this.command = command; } }
+class Diagnostic { constructor(range, message, severity) { this.range = range; this.message = message; this.severity = severity; } }
+class CodeAction { constructor(title, kind) { this.title = title; this.kind = kind; } }
+class Selection extends Range {}
 
-const log = { info: [], warn: [], error: [], status: [], diffs: [] };
-const answers = { info: [], input: [] };
+// Diagnostics, keyed by uri string.
+const diagnostics = new Map();
+const docListeners = { open: [], change: [] };
+const files = new Map(); // fake disk: uri string -> { uri, text, languageId }
+const openDocs = [];
+
+const log = { info: [], warn: [], error: [], status: [], diffs: [], quickPick: [] };
+const answers = { info: [], input: [], quickPick: [] };
 const settings = {};
 const commands = new Map();
 let codeLensProvider = null;
+let codeActionProvider = null;
 
 class Document {
   constructor(text, languageId = 'csharp', path = '/w/Test.cs') {
@@ -54,7 +64,10 @@ class Document {
     if (!range) return this.text;
     return this.text.slice(this.offsetAt(range.start), this.offsetAt(range.end));
   }
-  setText(t) { this.text = t; this.version++; }
+  setText(t) {
+    this.text = t; this.version++;
+    docListeners.change.forEach((l) => l({ document: this }));
+  }
 }
 
 class Editor {
@@ -92,26 +105,70 @@ const window = {
   setStatusBarMessage: (msg) => { log.status.push(msg); return { dispose() {} }; },
   showInputBox: async () => answers.input.shift(),
   withProgress: async (_o, task) => task({ report() {} }, { onCancellationRequested() { return { dispose() {} }; } }),
-  showTextDocument: async () => window.activeTextEditor,
+  showTextDocument: async (docOrUri) => {
+    const doc = docOrUri instanceof Document ? docOrUri : await workspace.openTextDocument(docOrUri);
+    const editor = new Editor(doc);
+    editor.revealRange = () => {};
+    window.activeTextEditor = editor;
+    return editor;
+  },
+  showQuickPick: async (items, options) => { log.quickPick.push({ items, options }); return answers.quickPick.shift()?.(items); },
   tabGroups: { all: [], onDidChangeTabs: () => ({ dispose() {} }), close: async () => true }
 };
 
 const workspace = {
   getConfiguration: () => ({ get: (k, d) => (k in settings ? settings[k] : d) }),
   onDidChangeConfiguration: () => ({ dispose() {} }),
+  onDidOpenTextDocument: (fn) => { docListeners.open.push(fn); return { dispose() {} }; },
+  onDidChangeTextDocument: (fn) => { docListeners.change.push(fn); return { dispose() {} }; },
+  onDidRenameFiles: () => ({ dispose() {} }),
+  createFileSystemWatcher: () => ({ onDidChange: () => ({ dispose() {} }), onDidDelete: () => ({ dispose() {} }), dispose() {} }),
+  get textDocuments() { return openDocs; },
+  asRelativePath: (uri) => uri.path.replace(/^\/w\//, ''),
+  findFiles: async () => [...files.values()].map((f) => f.uri),
+  openTextDocument: async (uri) => {
+    const existing = openDocs.find((d) => d.uri.toString() === uri.toString());
+    if (existing) return existing;
+    const f = files.get(uri.toString());
+    if (!f) throw new Error('not found ' + uri);
+    const doc = new Document(f.text, f.languageId, uri.path);
+    openDocs.push(doc);
+    docListeners.open.forEach((l) => l(doc));
+    return doc;
+  },
   registerTextDocumentContentProvider: () => ({ dispose() {} }),
   getWorkspaceFolder: () => undefined,
   workspaceFolders: undefined,
-  fs: { readFile: async () => { throw new Error('nope'); } }
+  fs: {
+    readFile: async (uri) => {
+      const f = files.get(uri.toString());
+      if (!f) throw new Error('nope');
+      return Buffer.from(f.text);
+    },
+    stat: async (uri) => ({ size: Buffer.byteLength(files.get(uri.toString())?.text ?? '') })
+  }
 };
 
 module.exports = {
   Position, Range, Uri, EventEmitter, ThemeColor, TabInputTextDiff, CodeLens,
+  Diagnostic, CodeAction, Selection,
+  DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
+  CodeActionKind: { QuickFix: 'quickfix' },
+  TextEditorRevealType: { InCenter: 2 },
   EndOfLine: { LF: 1, CRLF: 2 },
-  ProgressLocation: { Window: 10 },
+  ProgressLocation: { Window: 10, Notification: 15 },
   ViewColumn: { Beside: -2 },
   window, workspace,
-  languages: { registerCodeLensProvider: (_s, p) => { codeLensProvider = p; return { dispose() {} }; } },
+  languages: {
+    registerCodeLensProvider: (_s, p) => { codeLensProvider = p; return { dispose() {} }; },
+    registerCodeActionsProvider: (_s, p) => { codeActionProvider = p; return { dispose() {} }; },
+    createDiagnosticCollection: () => ({
+      set: (uri, d) => diagnostics.set(uri.toString(), d),
+      delete: (uri) => diagnostics.delete(uri.toString()),
+      has: (uri) => diagnostics.has(uri.toString()),
+      dispose() {}
+    })
+  },
   commands: {
     registerCommand: (id, fn) => { commands.set(id, fn); return { dispose() {} }; },
     executeCommand: async (id, ...args) => {
@@ -119,5 +176,9 @@ module.exports = {
       return commands.get(id)(...args);
     }
   },
-  __test: { log, answers, settings, commands, Document, Editor, getCodeLens: () => codeLensProvider }
+  __test: {
+    log, answers, settings, commands, Document, Editor, diagnostics, files, openDocs,
+    getCodeLens: () => codeLensProvider,
+    getCodeActions: () => codeActionProvider
+  }
 };

@@ -1,0 +1,11 @@
+# npm package = the lugus CLI only (the extension ships as a .vsix)
+src/
+test/
+out-test/
+docs/
+.github/
+.vscode/
+*.vsix
+dist/extension.js*
+dist/*.map
+tsconfig*.json

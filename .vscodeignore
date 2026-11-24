@@ -12,3 +12,6 @@ tsconfig*.json
 **/*.map
 **/*.ts
 *.vsix
+.github/**
+dist/cli.js
+.npmignore

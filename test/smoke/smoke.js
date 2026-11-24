@@ -1,6 +1,6 @@
 // End-to-end smoke test of the bundled extension against an in-memory VS Code
 // API (vscode-mock.js) and a fake model endpoint. No network, no VS Code needed.
-// Usage: npm run test:smoke
+// Usage: npm run test:smoke (builds the extension and a core helper bundle first)
 const Module = require('module');
 const path = require('path');
 const assert = require('assert/strict');
@@ -8,7 +8,10 @@ const mock = require('./vscode-mock');
 const origLoad = Module._load;
 Module._load = function (req, ...rest) { return req === 'vscode' ? mock : origLoad.call(this, req, ...rest); };
 
-const { log, answers, settings, commands, Document, Editor, getCodeLens } = mock.__test;
+const { log, answers, settings, commands, Document, Editor, getCodeLens, getCodeActions, diagnostics, files } = mock.__test;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Core helpers bundled separately by the test:smoke script (to build expected markers).
+const { formatMarker } = require(path.resolve(process.argv[3]));
 const ext = require(path.resolve(process.argv[2]));
 
 // ---- fake model
@@ -37,7 +40,7 @@ function open(text, lang) {
 }
 const run = (id, ...args) => commands.get(id)(...args);
 const states = (doc) => getCodeLens().provideCodeLenses(doc).filter((l) => !l.command.command).map((l) => l.command.title);
-function reset() { answers.info.length = 0; answers.input.length = 0; for (const k of Object.keys(log)) log[k].length = 0; requests = []; modelReplies = []; }
+function reset() { answers.info.length = 0; answers.input.length = 0; answers.quickPick.length = 0; files.clear(); diagnostics.clear(); delete settings['driftSeverity']; for (const k of Object.keys(log)) log[k].length = 0; requests = []; modelReplies = []; }
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -214,6 +217,79 @@ test('keybinding path (no args) uses the cursor', async () => {
   assert.ok(doc.text.startsWith('//> say hi\nhi();\n// </lugus> code:'));
 });
 
+
+// ------------------------------------------------------------ drift overview
+
+function addFile(name, lines, languageId = 'csharp') {
+  const uri = mock.Uri.file('/w/' + name);
+  files.set(uri.toString(), { uri, text: lines.join('\n'), languageId });
+  return uri;
+}
+const linkedBlock = (rule, code, token = '//') => [`${token}> ${rule}`, ...code, formatMarker('', token, code.join('\n'), [rule])];
+
+test('drift diagnostics follow edits and offer quick fixes', async () => {
+  const uri = addFile('Drift.cs', ['class A {', ...linkedBlock('sum a and b', ['return a + b;']), '}']);
+  const doc = await mock.workspace.openTextDocument(uri);
+  assert.deepEqual(diagnostics.get(uri.toString()), []);
+  doc.setText(doc.text.replace('sum a and b', 'sum a and b twice'));
+  await sleep(350);
+  const [d] = diagnostics.get(uri.toString());
+  assert.equal(d.code, 'rule-changed');
+  assert.equal(d.severity, mock.DiagnosticSeverity.Warning);
+  assert.equal(d.range.start.line, 1);
+  assert.match(d.message, /^Lugus: rule changed\./);
+  const actions = getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
+  assert.deepEqual(actions.map((a) => a.command.command), ['lugus.translate', 'lugus.accept']);
+  assert.deepEqual(actions[0].command.arguments, [uri, 1]);
+
+  doc.setText(doc.text.replace('return a + b;', 'return a + b + 0;'));
+  await sleep(350);
+  const [both] = diagnostics.get(uri.toString());
+  assert.equal(both.code, 'both-changed');
+
+  settings['driftSeverity'] = 'off';
+  doc.setText(doc.text + '\n');
+  await sleep(350);
+  assert.equal(diagnostics.has(uri.toString()), false);
+});
+
+test('code edited by hand offers Accept first', async () => {
+  const uri = addFile('Hand.cs', linkedBlock('rule', ['a();']));
+  const doc = await mock.workspace.openTextDocument(uri);
+  doc.setText(doc.text.replace('a();', 'b();'));
+  await sleep(350);
+  const [d] = diagnostics.get(uri.toString());
+  const actions = getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
+  assert.equal(actions[0].command.command, 'lugus.accept');
+});
+
+test('show blocks to review: scans the workspace and opens the pick', async () => {
+  addFile('ok.cs', linkedBlock('fine', ['ok();']));
+  const bad = linkedBlock('return the max', ['return Math.Max(a, b);']);
+  bad[1] = 'return Math.Min(a, b);';
+  const badUri = addFile('src/bad.cs', ['// header', ...bad]);
+  addFile('old.py', ['#> legacy', 'x = 1', '# </lugus>'], 'python');
+  addFile('notes.txt', ['nothing here']);
+  answers.quickPick.push((items) => items[0]);
+  await run('lugus.showDrifted');
+  const { items, options } = log.quickPick[0];
+  assert.equal(items.length, 2);
+  assert.match(options.title, /2 blocks to review \(of 3\)/);
+  assert.match(items[0].label, /\$\(warning\) return the max/);
+  assert.match(items[0].description, /code edited by hand · src\/bad\.cs:2/);
+  assert.match(items[1].label, /\$\(question\) legacy/);
+  assert.equal(mock.window.activeTextEditor.document.uri.toString(), badUri.toString());
+  assert.equal(mock.window.activeTextEditor.selection.start.line, 1);
+  assert.equal(diagnostics.get(badUri.toString())[0].code, 'code-edited');
+});
+
+test('show blocks to review: all aligned', async () => {
+  addFile('ok.cs', linkedBlock('fine', ['ok();']));
+  await run('lugus.showDrifted');
+  assert.equal(log.quickPick.length, 0);
+  assert.ok(log.info.some((m) => m.includes('all 1 linked blocks are aligned')));
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
@@ -222,5 +298,5 @@ test('keybinding path (no args) uses the cursor', async () => {
     catch (e) { failed++; console.log('FAIL ', t.name, '\n      ', e.message, '\n', 'errors:', log.error); }
   }
   console.log(failed ? `${failed} failed` : `all ${tests.length} passed`);
-  process.exit(failed ? 1 : 0);
+  process.exit(failed ? 1 : 0); // timers from the drift monitor would keep the process alive
 })();

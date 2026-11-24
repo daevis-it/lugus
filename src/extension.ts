@@ -11,6 +11,7 @@ import {
 } from './aiClient';
 import { CommentBlock, extractLocalContext, getBlockAt, relocateBlock } from './commentParser';
 import { LugusCodeLensProvider } from './codeLensProvider';
+import { DriftMonitor, showDriftedBlocks } from './drift';
 import { linkSelection } from './linkSelection';
 import { loadProjectRules } from './projectRules';
 import { reviewReplacement } from './reviewReplacement';
@@ -26,6 +27,7 @@ class UserFacingError extends Error {}
 
 export function activate(context: vscode.ExtensionContext): void {
   const codeLens = new LugusCodeLensProvider();
+  const drift = new DriftMonitor();
   const loading = vscode.window.createTextEditorDecorationType({
     after: {
       contentText: '  ⟳ Lugus is working…',
@@ -293,6 +295,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     loading,
     codeLens,
+    drift,
+    vscode.languages.registerCodeActionsProvider([{ scheme: 'file' }, { scheme: 'untitled' }], drift, {
+      providedCodeActionKinds: DriftMonitor.providedCodeActionKinds
+    }),
+    vscode.commands.registerCommand('lugus.showDrifted', () => showDriftedBlocks(drift)),
     vscode.languages.registerCodeLensProvider([{ scheme: 'file' }, { scheme: 'untitled' }], codeLens),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('lugus')) {

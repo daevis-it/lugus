@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (0.3.0)
+
+### Added
+- **Drift in the Problems panel.** Drifted and not-verified blocks are reported as diagnostics, with **Update code** and **Accept** as quick fixes. Severity is configurable with `lugus.driftSeverity` (`warning` by default, or `information`, `hint`, `off`).
+- **Lugus: Show Blocks to Review** scans the workspace and lists every block whose rule and code are out of sync. Selecting one opens it.
+- **`lugus check` CLI** for pre-commit hooks and CI: `npm install -g github:daevis-it/lugus`, then `lugus check [paths] [--json] [--strict]`. Exits with 1 when a block has drifted.
+- GitHub Actions CI: typecheck, unit tests, end-to-end smoke test and `lugus check` on Linux and Windows, plus a packaged `.vsix` artifact.
+
+### Removed
+- The "logic check" roadmap item. Lugus stays focused on keeping rules and code aligned.
+
 ## 0.2.0
 
 ### Added

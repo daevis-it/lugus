@@ -79,7 +79,7 @@ Unchanged from inline mode. `src/core/blocks.ts` already separates the fingerpri
 
 ### Team workflow
 
-- CI check (later): a small CLI built from `src/core` runs `lugus check` and reports orphaned or drifted rules on pull requests, without needing VS Code.
+- CI check: `lugus check` (shipped in 0.3.0 for inline blocks) will read `.lugus/` too and report orphaned rules alongside drifted ones, without needing VS Code.
 - A drifted rule is information, not an error: the team decides whether to accept the code or update it.
 
 ## Out of scope
