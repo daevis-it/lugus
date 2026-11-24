@@ -38,29 +38,23 @@
     "commands": [
       {
         "command": "lugus.translate",
-        "title": "Translate / Update Block",
-        "category": "Lugus"
+        "title": "Lugus: Translate / Update Block"
       },
       {
         "command": "lugus.linkSelection",
-        "title": "Link Selected Code to a Rule",
-        "category": "Lugus",
-        "enablement": "editorHasSelection && !editorReadonly"
+        "title": "Lugus: Link Selected Code to a Rule"
       },
       {
         "command": "lugus.accept",
-        "title": "Accept Block As Aligned",
-        "category": "Lugus"
+        "title": "Lugus: Accept Block As Aligned"
       },
       {
         "command": "lugus.detach",
-        "title": "Detach Block (Keep Code)",
-        "category": "Lugus"
+        "title": "Lugus: Detach Block (Keep Code)"
       },
       {
         "command": "lugus.setApiKey",
-        "title": "Set API Key",
-        "category": "Lugus"
+        "title": "Lugus: Set API Key"
       }
     ],
     "menus": {
