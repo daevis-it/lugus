@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { formatMarker } from '../src/core/blocks';
 import { checkText, commentTokenForFile, describeState, isDrift, mayContainBlocks } from '../src/core/check';
 import { run } from '../src/cli';
+import { fileSymbol, makeEntry, serializeSidecar } from '../src/core/sidecar';
 
 function linked(rule: string, code: string[], token = '//'): string[] {
   return [`${token}> ${rule}`, ...code, formatMarker('', token, code.join('\n'), [rule])];
@@ -124,7 +125,7 @@ describe('lugus check (CLI)', () => {
     const report = JSON.parse(r.out);
     assert.equal(report.ok, false);
     assert.equal(report.checked, 1);
-    assert.deepEqual(report.findings[0], { file: 'x.cs', line: 1, state: 'code-edited', rule: 'sum a and b' });
+    assert.deepEqual(report.findings[0], { file: 'x.cs', line: 1, state: 'code-edited', rule: 'sum a and b', storage: 'inline' });
   });
 
   it('ignores binary files', () => {
@@ -139,5 +140,61 @@ describe('lugus check (CLI)', () => {
     assert.equal(cli(['check', '--nope'], root).code, 2);
     assert.equal(cli(['check', 'missing'], root).code, 2);
     assert.equal(cli(['--version'], root).code, 0);
+  });
+});
+
+describe('lugus check: sidecar rules', () => {
+  const calc = ['class Calc {', '    int Sum(int a, int b) {', '        return a + b;', '    }', '}'];
+  const entry = makeEntry('a1b2c3d4', ['add a and b'], { path: 'Calc.Sum', kind: 'Method', startLine: 1, endLine: 3 }, calc);
+  const rules = serializeSidecar({ version: 1, blocks: [entry] });
+
+  it('passes when the recorded code is still there (even moved)', () => {
+    const root = project({ 'src/Calc.cs': ['using X;', '', ...calc].join('\n'), '.lugus/rules/src/Calc.cs.json': rules });
+    const r = cli(['check'], root);
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.out, /1 linked block checked, 0 drifted/);
+  });
+
+  it('reports edited code with the source location', () => {
+    const edited = calc.map((l) => l.replace('a + b', 'a - b')).join('\n');
+    const root = project({ 'src/Calc.cs': edited, '.lugus/rules/src/Calc.cs.json': rules });
+    const r = cli(['check'], root);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /^src\/Calc\.cs:2 {2}code edited by hand {2}"add a and b" {2}\(sidecar\)$/m);
+  });
+
+  it('reports rules whose source file is gone as orphaned', () => {
+    const root = project({ '.lugus/rules/src/Gone.cs.json': rules });
+    const r = cli(['check', '--json'], root);
+    assert.equal(r.code, 1);
+    assert.equal(JSON.parse(r.out).findings[0].state, 'orphaned');
+  });
+
+  it('only checks sources inside the given paths', () => {
+    const edited = calc.map((l) => l.replace('a + b', 'a - b')).join('\n');
+    const root = project({ 'src/Calc.cs': edited, 'lib/ok.cs': 'x', '.lugus/rules/src/Calc.cs.json': rules });
+    assert.equal(cli(['check', 'lib'], root).code, 0);
+    assert.equal(cli(['check', 'src'], root).code, 1);
+  });
+
+  it('fails loudly on an unreadable rules file', () => {
+    const root = project({ 'src/Calc.cs': calc.join('\n'), '.lugus/rules/src/Calc.cs.json': '{ nope' });
+    const r = cli(['check'], root);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /cannot read \.lugus\/rules\/src\/Calc\.cs\.json: not valid JSON/);
+  });
+});
+
+describe('lugus check: whole-file rules', () => {
+  const cfg = ['{', '  "debug": false', '}', ''];
+  const rules = serializeSidecar({ version: 1, blocks: [makeEntry('f1', ['debug off'], fileSymbol(cfg), cfg)] });
+
+  it('checks any file type against its file rule', () => {
+    const root = project({ 'config/app.json': cfg.join('\n'), '.lugus/rules/config/app.json.json': rules });
+    assert.equal(cli(['check'], root).code, 0);
+    const edited = project({ 'config/app.json': cfg.join('\n').replace('false', 'true'), '.lugus/rules/config/app.json.json': rules });
+    const r = cli(['check'], edited);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /^config\/app\.json:1 {2}code edited by hand {2}"debug off" {2}\(sidecar\)$/m);
   });
 });

@@ -8,7 +8,7 @@ const mock = require('./vscode-mock');
 const origLoad = Module._load;
 Module._load = function (req, ...rest) { return req === 'vscode' ? mock : origLoad.call(this, req, ...rest); };
 
-const { log, answers, settings, commands, Document, Editor, getCodeLens, getCodeActions, diagnostics, files } = mock.__test;
+const { log, answers, settings, commands, Document, Editor, getCodeLens, getCodeActions, diagnostics, files, fsLog, renameListeners, symbolProvider } = mock.__test;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Core helpers bundled separately by the test:smoke script (to build expected markers).
 const { formatMarker } = require(path.resolve(process.argv[3]));
@@ -40,8 +40,8 @@ function open(text, lang) {
   return { doc, editor };
 }
 const run = (id, ...args) => commands.get(id)(...args);
-const states = (doc) => getCodeLens().provideCodeLenses(doc).filter((l) => !l.command.command).map((l) => l.command.title);
-function reset() { answers.info.length = 0; answers.input.length = 0; answers.quickPick.length = 0; files.clear(); diagnostics.clear(); delete settings['driftSeverity']; for (const k of Object.keys(log)) log[k].length = 0; requests = []; modelReplies = []; }
+const states = async (doc) => (await getCodeLens().provideCodeLenses(doc)).filter((l) => !l.command.command).map((l) => l.command.title);
+function reset() { answers.warn.length = 0; fsLog.length = 0; symbolProvider.enabled = true; mock.__test.openDocs.length = 0; answers.info.length = 0; answers.input.length = 0; answers.quickPick.length = 0; files.clear(); diagnostics.clear(); delete settings['driftSeverity']; for (const k of Object.keys(log)) log[k].length = 0; requests = []; modelReplies = []; }
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -65,8 +65,8 @@ test('generate: new rule becomes a linked, aligned block, no review', async () =
   ]);
   assert.equal(log.diffs.length, 0);
   assert.equal(requests[0].system.includes('translator'), true);
-  assert.deepEqual(states(doc), ['✓ Lugus: aligned']);
-  const titles = getCodeLens().provideCodeLenses(doc).map((l) => l.command.title);
+  assert.deepEqual(await states(doc), ['✓ Lugus: aligned']);
+  const titles = (await getCodeLens().provideCodeLenses(doc)).map((l) => l.command.title);
   assert.ok(titles[0].includes('aligned'), titles.join(','));
   global.__doc1 = doc;
 });
@@ -75,7 +75,7 @@ test('rule change -> update mode sends current code, diff shown, apply', async (
   const doc = global.__doc1; open(doc.text); mock.window.activeTextEditor.document = doc;
   mock.window.activeTextEditor = new Editor(doc);
   doc.setText(doc.text.replace('return the sum of a and b', 'return the sum of a and b, doubled'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('rule changed'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('rule changed'));
   modelReplies = ['return (a + b) * 2;'];
   answers.info.push('Apply');
   await run('lugus.translate', doc.uri, 2);
@@ -83,7 +83,7 @@ test('rule change -> update mode sends current code, diff shown, apply', async (
   assert.ok(requests[0].system.includes('smallest change'));
   assert.equal(log.diffs.length, 1);
   assert.ok(doc.text.includes('        return (a + b) * 2;'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
   assert.equal(doc.lines[0], 'class Calc {');
   assert.equal(doc.lines[1], '    int Sum(int a, int b) {');
 });
@@ -96,7 +96,7 @@ test('review rejected leaves the file untouched', async () => {
   answers.info.push('Keep Current');
   await run('lugus.translate', doc.uri, 2);
   assert.equal(doc.text, before);
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('rule changed'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('rule changed'));
 });
 
 test('model returns the same code -> marker restamped, no diff', async () => {
@@ -106,7 +106,7 @@ test('model returns the same code -> marker restamped, no diff', async () => {
   assert.equal(log.diffs.length, 0);
   assert.ok(log.info.some((m) => m.includes('already implements')));
   assert.ok(doc.text.includes('return (a + b) * 2;'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
 });
 
 test('aligned block: translate asks first, no model call if dismissed', async () => {
@@ -119,10 +119,10 @@ test('aligned block: translate asks first, no model call if dismissed', async ()
 test('hand edit -> code-edited; Accept re-signs without calling the model', async () => {
   const doc = global.__doc1; mock.window.activeTextEditor = new Editor(doc);
   doc.setText(doc.text.replace('return (a + b) * 2;', 'return checked((a + b) * 2);'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('code edited'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('code edited'));
   await run('lugus.accept', doc.uri, 2);
   assert.equal(requests.length, 0);
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
   assert.ok(doc.text.includes('return checked((a + b) * 2);'));
 });
 
@@ -143,7 +143,7 @@ test('link selection keeps the code byte-for-byte and is aligned', async () => {
     '# </lugus> H'
   ]);
   assert.equal(requests.length, 0);
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
   global.__py = doc;
 });
 
@@ -158,7 +158,7 @@ test('changing the rule of linked code updates it, signature kept in CURRENT COD
   assert.ok(requests[0].messages[0].content.includes('def is_adult(person):'));
   assert.ok(doc.text.includes('    return person.age >= 21'), doc.text + '\n' + log.info.join('|'));
   assert.ok(doc.text.startsWith('import x\n\n#> maggiorenne'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
 });
 
 test('edits above the block during the request are tolerated', async () => {
@@ -205,9 +205,9 @@ test('detach keeps only the code; works with empty body and at end of file', asy
 
 test('legacy marker shows unverified, Accept fixes it', async () => {
   const { doc } = open(['//> rule', 'x();', '// </lugus> sha256:0123456789abcdef'].join('\n'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('not verified'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('not verified'));
   await run('lugus.accept', doc.uri, 1);
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
 });
 
 test('keybinding path (no args) uses the cursor', async () => {
@@ -231,7 +231,8 @@ const linkedBlock = (rule, code, token = '//') => [`${token}> ${rule}`, ...code,
 test('drift diagnostics follow edits and offer quick fixes', async () => {
   const uri = addFile('Drift.cs', ['class A {', ...linkedBlock('sum a and b', ['return a + b;']), '}']);
   const doc = await mock.workspace.openTextDocument(uri);
-  assert.deepEqual(diagnostics.get(uri.toString()), []);
+  await sleep(10);
+  assert.equal(diagnostics.has(uri.toString()), false);
   doc.setText(doc.text.replace('sum a and b', 'sum a and b twice'));
   await sleep(350);
   const [d] = diagnostics.get(uri.toString());
@@ -239,7 +240,7 @@ test('drift diagnostics follow edits and offer quick fixes', async () => {
   assert.equal(d.severity, mock.DiagnosticSeverity.Warning);
   assert.equal(d.range.start.line, 1);
   assert.match(d.message, /^Lugus: rule changed\./);
-  const actions = getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
+  const actions = await getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
   assert.deepEqual(actions.map((a) => a.command.command), ['lugus.translate', 'lugus.accept']);
   assert.deepEqual(actions[0].command.arguments, [uri, 1]);
 
@@ -260,7 +261,7 @@ test('code edited by hand offers Accept first', async () => {
   doc.setText(doc.text.replace('a();', 'b();'));
   await sleep(350);
   const [d] = diagnostics.get(uri.toString());
-  const actions = getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
+  const actions = await getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
   assert.equal(actions[0].command.command, 'lugus.accept');
 });
 
@@ -299,15 +300,15 @@ test('restore: a hand edit goes back to the last aligned code, no model call', a
   await run('lugus.translate', doc.uri, 2);
   const aligned = doc.text;
   doc.setText(doc.text.replace('        return 42;', '        var junk = 1;\n        return 42;'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('code edited'));
-  assert.ok(getCodeLens().provideCodeLenses(doc).some((l) => l.command.command === 'lugus.restore'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('code edited'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc)).some((l) => l.command.command === 'lugus.restore'));
   requests = [];
   answers.info.push('Apply');
   await run('lugus.restore', doc.uri, 2);
   assert.equal(requests.length, 0);
   assert.equal(log.diffs.length, 1);
   assert.equal(doc.text, aligned);
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
 });
 
 test('restore: works after reopening, from blocks seen aligned by the monitor', async () => {
@@ -328,7 +329,7 @@ test('restore: both changed keeps the new rule and restores only the code', asyn
   answers.info.push('Apply');
   await run('lugus.restore', doc.uri, 0);
   assert.ok(doc.text.startsWith('//> say hello\nhi();\n'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('rule changed'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('rule changed'));
 });
 
 test('restore: nothing saved -> clear warning, file untouched', async () => {
@@ -353,7 +354,7 @@ test('re-align on hand-edited code: model changes nothing -> user decides, no si
   await run('lugus.translate', doc.uri, 0);
   assert.equal(doc.text, edited);
   assert.ok(log.info.some((m) => m.includes('hand edits included')));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('code edited'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('code edited'));
 
   // Restore chosen: back to the aligned code.
   modelReplies = ['total = a + b;\nlog(total);'];
@@ -371,7 +372,7 @@ test('re-align on hand-edited code: Accept keeps the edits as aligned', async ()
   answers.info.push('Accept Current Code');
   await run('lugus.translate', doc.uri, 0);
   assert.ok(doc.text.includes('// checked'));
-  assert.ok(getCodeLens().provideCodeLenses(doc)[0].command.title.includes('aligned'));
+  assert.ok((await getCodeLens().provideCodeLenses(doc))[0].command.title.includes('aligned'));
 });
 
 test('restore: falls back to the committed version in git', async () => {
@@ -394,6 +395,317 @@ test('restore: falls back to the committed version in git', async () => {
   await run('lugus.restore', doc.uri, 1);
   assert.equal(log.warn.length, 0, log.warn.join());
   assert.equal(doc.text, committed);
+});
+
+// ------------------------------------------------------------ sidecar
+
+const CALC = [
+  'class Calc {',
+  '    int Sum(int a, int b) {',
+  '        return a + b;',
+  '    }',
+  '',
+  '    int Total(int[] xs) {',
+  '        return xs.Sum();',
+  '    }',
+  '}'
+];
+const RULES = '/w/.lugus/rules/src/Calc.cs.json';
+const rulesFile = () => {
+  const f = files.get('file:' + RULES);
+  return f ? JSON.parse(f.text) : null;
+};
+async function openCalc(lines = CALC) {
+  const uri = addFile('src/Calc.cs', lines);
+  const doc = await mock.workspace.openTextDocument(uri);
+  const editor = new Editor(doc);
+  mock.window.activeTextEditor = editor;
+  return { uri, doc, editor };
+}
+const lensTitles = async (doc) => (await getCodeLens().provideCodeLenses(doc)).map((l) => l.command.title);
+const lensFor = async (doc, title) => (await getCodeLens().provideCodeLenses(doc)).find((l) => l.command.title === title);
+async function linkSum(rule = 'add a and b') {
+  const ctx = await openCalc();
+  ctx.editor.select(2, 4, 2, 4);
+  answers.input.push(rule);
+  await run('lugus.linkSymbol');
+  return ctx;
+}
+
+test('sidecar: link attaches the rule to the method, source untouched', async () => {
+  const { doc } = await linkSum();
+  assert.equal(doc.text, CALC.join('\n'));
+  const file = rulesFile();
+  assert.equal(file.blocks.length, 1);
+  assert.deepEqual(file.blocks[0].rule, ['add a and b']);
+  assert.deepEqual(file.blocks[0].anchor, { symbol: 'Calc.Sum', kind: 'Method', line: 1, firstLine: 'int Sum(int a, int b) {', lineCount: 3 });
+  const titles = await lensTitles(doc);
+  assert.deepEqual(titles, ['✓ Lugus: "add a and b"', 'Edit Rule', 'Detach']);
+  const lens = await lensFor(doc, 'Edit Rule');
+  assert.equal(lens.range.start.line, 1);
+  assert.deepEqual(lens.command.arguments, [doc.uri, file.blocks[0].id]);
+  assert.equal(requests.length, 0);
+});
+
+test('sidecar: link refuses a symbol that already has a rule, and needs symbols', async () => {
+  const { editor } = await linkSum();
+  editor.select(1, 0, 1, 0);
+  await run('lugus.linkSymbol');
+  assert.ok(log.info.some((m) => m.includes('already has a rule')));
+  symbolProvider.enabled = false;
+  editor.select(6, 0, 6, 0);
+  await run('lugus.linkSymbol');
+  assert.ok(log.warn.some((m) => m.includes('symbols are not available yet')));
+  assert.equal(rulesFile().blocks.length, 1);
+});
+
+test('sidecar: edit rule -> rule changed -> update edits the method, review, aligned', async () => {
+  const { doc } = await linkSum();
+  const id = rulesFile().blocks[0].id;
+  answers.input.push('add a and b, then double the result');
+  await run('lugus.sidecar.editRule', doc.uri, id);
+  assert.ok((await lensTitles(doc))[0].startsWith('● Lugus: rule changed — "add a and b, then double'));
+  await sleep(20);
+  const [d] = diagnostics.get(doc.uri.toString());
+  assert.equal(d.source, 'Lugus sidecar');
+  assert.equal(d.code, 'rule-changed');
+  const actions = await getCodeActions().provideCodeActions(doc, d.range, { diagnostics: [d] });
+  assert.deepEqual(actions.map((a) => a.command.command), ['lugus.sidecar.update', 'lugus.sidecar.accept']);
+
+  modelReplies = ['int Sum(int a, int b) {\n    return (a + b) * 2;\n}'];
+  answers.info.push('Apply');
+  await run('lugus.sidecar.update', doc.uri, id);
+  assert.equal(log.error.length, 0, log.error.join());
+  assert.ok(requests[0].messages[0].content.includes('--- CURRENT CODE (csharp) ---\nint Sum(int a, int b) {\n    return a + b;\n}'));
+  assert.equal(log.diffs.length, 1);
+  assert.equal(doc.lines[2], '        return (a + b) * 2;');
+  assert.equal(doc.lines[1], '    int Sum(int a, int b) {');
+  assert.deepEqual(await lensTitles(doc), ['✓ Lugus: "add a and b, then double the result"', 'Edit Rule', 'Detach']);
+});
+
+test('sidecar: keybinding inside the method routes to the sidecar rule', async () => {
+  const { doc, editor } = await linkSum();
+  answers.input.push('subtract b from a');
+  await run('lugus.sidecar.editRule', doc.uri, rulesFile().blocks[0].id);
+  editor.selection = { active: new mock.Position(2, 8), start: new mock.Position(2, 8) };
+  modelReplies = ['int Sum(int a, int b) {\n    return a - b;\n}'];
+  answers.info.push('Apply');
+  await run('lugus.translate');
+  assert.equal(requests.length, 1);
+  assert.equal(doc.lines[2], '        return a - b;');
+});
+
+test('sidecar: hand edit -> restore from snapshot; moved code stays aligned', async () => {
+  const { doc } = await linkSum();
+  const id = rulesFile().blocks[0].id;
+  doc.setText('// header\n// more\n' + doc.text);
+  assert.equal((await lensTitles(doc))[0], '✓ Lugus: "add a and b"');
+  doc.setText(doc.text.replace('return a + b;', 'return a + b; // tweak'));
+  assert.ok((await lensTitles(doc))[0].startsWith('✎ Lugus: code edited by hand'));
+  answers.info.push('Apply');
+  await run('lugus.sidecar.restore', doc.uri, id);
+  assert.equal(requests.length, 0);
+  assert.ok(!doc.text.includes('tweak'));
+  assert.equal((await lensTitles(doc))[0], '✓ Lugus: "add a and b"');
+});
+
+test('sidecar: renamed method -> orphaned, re-attach, accept', async () => {
+  const { doc } = await linkSum();
+  const id = rulesFile().blocks[0].id;
+  doc.setText(doc.text.replace('int Sum(int a, int b)', 'int Add(int a, int b)'));
+  const titles = await lensTitles(doc);
+  assert.equal(titles[0], '⚠ Lugus: rule for Calc.Sum lost its symbol — "add a and b"');
+  assert.deepEqual(titles.slice(1), ['Re-attach', 'Delete Rule']);
+  assert.equal((await lensFor(doc, 'Re-attach')).range.start.line, 0);
+
+  answers.quickPick.push((items) => items.find((i) => i.label === 'Calc.Add'));
+  await run('lugus.sidecar.reattach', doc.uri, id);
+  assert.equal(rulesFile().blocks[0].anchor.symbol, 'Calc.Add');
+  assert.ok((await lensTitles(doc))[0].startsWith('✎ Lugus: code edited by hand'));
+  await run('lugus.sidecar.accept', doc.uri, id);
+  assert.equal((await lensTitles(doc))[0], '✓ Lugus: "add a and b"');
+});
+
+test('sidecar: no symbols yet -> state from fingerprints, actions wait, no edits', async () => {
+  const { doc } = await linkSum();
+  const id = rulesFile().blocks[0].id;
+  symbolProvider.enabled = false;
+  assert.deepEqual(await lensTitles(doc), ['✓ Lugus: "add a and b" (waiting for language support)']);
+  answers.input.push('changed');
+  await run('lugus.sidecar.editRule', doc.uri, id);
+  assert.ok((await lensTitles(doc))[0].startsWith('● Lugus: rule changed'));
+  const before = doc.text;
+  await run('lugus.sidecar.update', doc.uri, id);
+  assert.equal(requests.length, 0);
+  assert.equal(doc.text, before);
+  assert.ok(log.warn.some((m) => m.includes('symbols are not available yet')));
+});
+
+test('sidecar: move inline <-> sidecar keeps fingerprints and state', async () => {
+  const { doc, editor } = await linkSum();
+  const id = rulesFile().blocks[0].id;
+  await run('lugus.moveInline', doc.uri, id);
+  assert.equal(rulesFile(), null);
+  assert.ok(fsLog.some(([op, p]) => op === 'delete' && p === RULES));
+  assert.equal(doc.lines[1], '    //> add a and b');
+  assert.match(doc.lines[5], /^ {4}\/\/ <\/lugus> code:[a-f0-9]{16} rule:[a-f0-9]{16}$/);
+  assert.equal((await lensTitles(doc))[0], '✓ Lugus: aligned');
+
+  // Edit the rule inline, then move back: the drift must travel with it.
+  doc.setText(doc.text.replace('//> add a and b', '//> add a and b twice'));
+  editor.selection = { active: new mock.Position(3, 0), start: new mock.Position(3, 0) };
+  await run('lugus.moveToSidecar');
+  assert.equal(log.error.length, 0, log.error.join());
+  assert.equal(doc.text, CALC.join('\n'));
+  assert.deepEqual(rulesFile().blocks[0].rule, ['add a and b twice']);
+  assert.ok((await lensTitles(doc))[0].startsWith('● Lugus: rule changed'));
+});
+
+test('sidecar: move to sidecar refuses blocks that are not exactly one symbol', async () => {
+  const { doc } = open(['class C {', '    void F() {', '        //> rule', '        x();', '        // </lugus> code:' + '0'.repeat(16) + ' rule:' + '0'.repeat(16), '    }', '}'].join('\n'));
+  mock.__test.openDocs.push(doc);
+  doc.uri = mock.Uri.file('/w/C.cs');
+  await run('lugus.moveToSidecar', doc.uri, 3);
+  assert.ok(log.info.some((m) => m.includes('not exactly one')));
+});
+
+test('sidecar: delete rule asks first', async () => {
+  const { doc } = await linkSum();
+  const id = rulesFile().blocks[0].id;
+  answers.warn.push(undefined);
+  await run('lugus.sidecar.detach', doc.uri, id);
+  assert.equal(rulesFile().blocks.length, 1);
+  answers.warn.push('Delete Rule');
+  await run('lugus.sidecar.detach', doc.uri, id);
+  assert.equal(rulesFile(), null);
+  assert.equal(doc.text, CALC.join('\n'));
+});
+
+test('sidecar: rules follow a renamed source file', async () => {
+  const { uri } = await linkSum();
+  const newUri = mock.Uri.file('/w/src/Math.cs');
+  renameListeners.forEach((l) => l({ files: [{ oldUri: uri, newUri }] }));
+  await sleep(20);
+  assert.equal(rulesFile(), null);
+  assert.ok(files.has('file:/w/.lugus/rules/src/Math.cs.json'));
+});
+
+test('sidecar: broken rules file is reported, not crashed on', async () => {
+  const { doc } = await linkSum();
+  files.get('file:' + RULES).text = '{ broken';
+  const titles = await lensTitles(doc);
+  assert.equal(titles[0], '⚠ Lugus: cannot read this file’s rules');
+});
+
+test('sidecar: workspace review lists drifted and orphaned sidecar rules', async () => {
+  const { doc } = await linkSum();
+  answers.input.push('changed rule');
+  await run('lugus.sidecar.editRule', doc.uri, rulesFile().blocks[0].id);
+  files.set('file:/w/.lugus/rules/gone/Old.cs.json', {
+    uri: mock.Uri.file('/w/.lugus/rules/gone/Old.cs.json'),
+    languageId: 'json',
+    text: JSON.stringify({ version: 1, blocks: [{ ...rulesFile().blocks[0], id: 'deadbeef' }] })
+  });
+  answers.quickPick.push(() => undefined);
+  await run('lugus.showDrifted');
+  const { items } = log.quickPick[0];
+  const descriptions = items.map((i) => i.description);
+  assert.ok(descriptions.some((d) => d === 'rule changed · src/Calc.cs:2 · sidecar'), descriptions.join('|'));
+  assert.ok(descriptions.some((d) => d.startsWith('orphaned rule · .lugus/rules/gone/Old.cs.json:1')), descriptions.join('|'));
+});
+
+// ------------------------------------------------------------ whole-file rules
+
+test('file rule: link any file (JSON, no symbols) from the Explorer', async () => {
+  symbolProvider.enabled = false; // file rules never need symbols
+  const uri = addFile('config/app.json', ['{', '  "debug": false', '}', ''], 'json');
+  answers.input.push('production config: debug always off');
+  await run('lugus.linkFile', uri);
+  const file = JSON.parse(files.get('file:/w/.lugus/rules/config/app.json.json').text);
+  assert.deepEqual(file.blocks[0].anchor, { symbol: '', kind: 'File', line: 0, firstLine: '{', lineCount: 3 });
+  const doc = await mock.workspace.openTextDocument(uri);
+  mock.window.activeTextEditor = new Editor(doc);
+  assert.deepEqual(await lensTitles(doc), ['✓ Lugus file rule: "production config: debug always off"', 'Edit Rule', 'Detach']);
+
+  // A second file rule is refused.
+  await run('lugus.linkFile', uri);
+  assert.ok(log.info.some((m) => m.includes('already has a file rule')));
+
+  // Hand edit -> code edited -> restore, still without symbols.
+  doc.setText(doc.text.replace('false', 'true'));
+  assert.ok((await lensTitles(doc))[0].startsWith('✎ Lugus file rule: code edited by hand'));
+  answers.info.push('Apply');
+  await run('lugus.sidecar.restore', doc.uri, file.blocks[0].id);
+  assert.equal(doc.text, '{\n  "debug": false\n}\n');
+  assert.equal(log.warn.length, 0, log.warn.join());
+});
+
+test('file rule: update rewrites the whole file behind a diff, keeps the final newline', async () => {
+  const uri = addFile('config/app.json', ['{', '  "debug": false', '}', ''], 'json');
+  answers.input.push('debug off');
+  await run('lugus.linkFile', uri);
+  const doc = await mock.workspace.openTextDocument(uri);
+  mock.window.activeTextEditor = new Editor(doc);
+  const id = JSON.parse(files.get('file:/w/.lugus/rules/config/app.json.json').text).blocks[0].id;
+  answers.input.push('debug off, port 8080');
+  await run('lugus.sidecar.editRule', doc.uri, id);
+  modelReplies = ['{\n  "debug": false,\n  "port": 8080\n}'];
+  answers.info.push('Apply');
+  await run('lugus.sidecar.update', doc.uri, id);
+  assert.equal(log.error.length, 0, log.error.join());
+  assert.equal(doc.text, '{\n  "debug": false,\n  "port": 8080\n}\n');
+  assert.ok(requests[0].messages[0].content.includes('--- CURRENT CODE (json) ---\n{\n  "debug": false\n}'));
+  assert.doesNotMatch(requests[0].system, /whole file this code belongs to/);
+  assert.equal((await lensTitles(doc))[0], '✓ Lugus file rule: "debug off, port 8080"');
+});
+
+test('file rule: is sent as a constraint when code inside the file is updated', async () => {
+  const { doc } = await linkSum();
+  answers.input.push('pure math helpers: no I/O, no logging');
+  await run('lugus.linkFile', doc.uri);
+  const sum = rulesFile().blocks.find((b) => b.anchor.kind === 'Method');
+  answers.input.push('add a and b, then double');
+  await run('lugus.sidecar.editRule', doc.uri, sum.id);
+  modelReplies = ['int Sum(int a, int b) {\n    return (a + b) * 2;\n}'];
+  answers.info.push('Apply');
+  await run('lugus.sidecar.update', doc.uri, sum.id);
+  assert.match(requests[0].system, /whole file this code belongs to follows this rule\. Your code must not contradict it:\npure math helpers: no I\/O, no logging/);
+  // Inline blocks in the same file get it too.
+  doc.setText(doc.text.replace('    int Total(int[] xs) {', '    int Total(int[] xs) {\n        //> return zero'));
+  modelReplies = ['return 0;'];
+  await run('lugus.translate', doc.uri, 6);
+  assert.match(requests[1].system, /pure math helpers/);
+});
+
+test('file rule: the keybinding prefers the function rule at the cursor over the file rule', async () => {
+  const { doc, editor } = await linkSum();
+  answers.input.push('math helpers');
+  await run('lugus.linkFile', doc.uri);
+  const sum = rulesFile().blocks.find((b) => b.anchor.kind === 'Method');
+  answers.input.push('subtract');
+  await run('lugus.sidecar.editRule', doc.uri, sum.id);
+  editor.selection = { active: new mock.Position(2, 8), start: new mock.Position(2, 8) };
+  modelReplies = ['int Sum(int a, int b) {\n    return a - b;\n}'];
+  answers.info.push('Apply');
+  await run('lugus.translate');
+  assert.ok(requests[0].messages[0].content.includes('--- RULE ---\nsubtract'));
+});
+
+test('file rule: large files ask before an update; move inline is refused', async () => {
+  const big = Array.from({ length: 400 }, (_, i) => `line ${i}`);
+  const uri = addFile('big.txt', big, 'plaintext');
+  answers.input.push('big rule');
+  await run('lugus.linkFile', uri);
+  const doc = await mock.workspace.openTextDocument(uri);
+  mock.window.activeTextEditor = new Editor(doc);
+  const id = JSON.parse(files.get('file:/w/.lugus/rules/big.txt.json').text).blocks[0].id;
+  answers.info.push('Update Anyway'); // "already matches" prompt
+  answers.warn.push(undefined); // large-file confirmation declined
+  await run('lugus.sidecar.update', doc.uri, id);
+  assert.equal(requests.length, 0);
+  assert.ok(log.warn.some((m) => m.includes('400 lines')));
+  await run('lugus.moveInline', doc.uri, id);
+  assert.ok(log.info.some((m) => m.includes('live only in .lugus/rules')));
 });
 
 (async () => {

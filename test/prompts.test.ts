@@ -38,4 +38,10 @@ describe('buildPrompt', () => {
     const p = buildPrompt({ ...base, mode: 'generate', projectRules: 'Target .NET 8.' });
     assert.match(p.system, /\.lugusrc[\s\S]*Target \.NET 8\./);
   });
+
+  it('sends the file rule as a constraint when present', () => {
+    const p = buildPrompt({ ...base, mode: 'update', currentCode: 'x();', fileRule: 'No I/O in this file.' });
+    assert.match(p.system, /whole file this code belongs to follows this rule[\s\S]*No I\/O in this file\./);
+    assert.doesNotMatch(buildPrompt({ ...base, mode: 'generate' }).system, /whole file/);
+  });
 });

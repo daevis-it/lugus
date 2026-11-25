@@ -37,6 +37,7 @@ export interface MarkerInfo {
  * - `code-edited`: the code was edited by hand; accept it or re-align it.
  * - `both-changed`: rule and code were both edited.
  * - `unverified`: the marker carries no usable fingerprints (older format).
+ * - `orphaned`: sidecar only, the symbol the rule was attached to is gone.
  */
 export type BlockState =
   | 'unlinked'
@@ -44,7 +45,8 @@ export type BlockState =
   | 'rule-changed'
   | 'code-edited'
   | 'both-changed'
-  | 'unverified';
+  | 'unverified'
+  | 'orphaned';
 
 const HASH_LANGUAGES = new Set([
   'python',

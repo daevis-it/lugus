@@ -48,7 +48,7 @@ If you edit the file while a request is running, Lugus checks the block again be
 
 ### Link code you already have
 
-Select the lines of an existing function or block, right-click and choose **Lugus: Link Selected Code to a Rule**. Describe in your own words the rule it implements. Lugus adds the rule above the code and a marker below it, leaving the code byte-for-byte unchanged. No model call happens. You can add more `//>` lines to the rule afterwards.
+Select the lines of an existing function or block, right-click and choose **Lugus: Link Selection to a Rule (Inline)**. Describe in your own words the rule it implements. Lugus adds the rule above the code and a marker below it, leaving the code byte-for-byte unchanged. No model call happens. You can add more `//>` lines to the rule afterwards.
 
 From then on the block works like any other: the model is only called when you change the rule and ask for an update.
 
@@ -83,12 +83,51 @@ src/Services/UserService.cs:42  rule changed  "Return the active users sorted by
 lugus: 12 linked blocks checked, 1 drifted.
 ```
 
-It exits with `0` when everything is aligned and `1` when a block has drifted. Old markers without fingerprints are listed as *not verified*; add `--strict` to fail on them too. As a git pre-commit hook (`.git/hooks/pre-commit`):
+It checks inline blocks and sidecar rules (in `.lugus/rules` at the repository root). It exits with `0` when everything is aligned and `1` when a block has drifted or a rule is orphaned. Old markers without fingerprints are listed as *not verified*; add `--strict` to fail on them too. As a git pre-commit hook (`.git/hooks/pre-commit`):
 
 ```sh
 #!/bin/sh
 lugus check || { echo "Lugus: some rules and code are out of sync. Update or Accept them, or commit with --no-verify."; exit 1; }
 ```
+
+### Keep rules out of the source (sidecar mode)
+
+Inline rules are great when you work alone. In shared code, a teammate who doesn't use Lugus sees `//>` lines and markers everywhere. Sidecar mode keeps the source clean: rules live in `.lugus/rules/<path of the source file>.json`, under version control next to the code, and Lugus shows them above the code they describe.
+
+Put the cursor anywhere inside a function, method or class (no selection needed), right-click and choose **Lugus: Link Function to a Rule (Sidecar)**. The rule is attached to that symbol; the source file is not touched.
+
+```json
+{
+  "version": 1,
+  "blocks": [
+    {
+      "id": "5f1c9a2e",
+      "rule": ["Return the active users sorted by last login"],
+      "anchor": { "symbol": "UserService.GetActiveUsers", "kind": "Method", "line": 41, "firstLine": "public List<User> GetActiveUsers() {", "lineCount": 9 },
+      "code": "8e3b0c4a1d2f7e65",
+      "ruleHash": "c41a7f0e9b3d2851"
+    }
+  ]
+}
+```
+
+Everything else works as with inline blocks: the CodeLens shows the status and the rule, and **Update Code**, **Accept**, **Restore** and the Problems panel all behave the same way. **Edit Rule** changes the rule (the code follows only when you ask), and the shortcut works anywhere inside the symbol.
+
+- **Anchors are symbols, not line numbers.** Lugus asks the language's symbol provider (C#, TypeScript, Python, C++… whatever extension you have installed) where the function is now, so rules survive edits, moves and reformatting. Overloads are told apart by their first line.
+- **Orphaned rules.** If you rename or delete the function, the rule becomes *orphaned*: Lugus never guesses. **Re-attach** it to another symbol, or delete it.
+- **No language support, no edits.** While the language extension is still loading, Lugus computes the status from the fingerprints and the recorded first line, but waits for real symbols before changing any code.
+- **Renames.** Renaming or moving a source file in VS Code moves its rules file too.
+- **Switching.** **Lugus: Move Block to Sidecar** moves an inline block that wraps exactly one function, method or class; **Lugus: Move Sidecar Rule Inline** does the opposite. Fingerprints travel with the rule, so the drift state is kept. Rules inside a function (not a whole symbol) stay inline.
+
+#### Whole-file rules
+
+Some files are one thing: a config, a shader, a data table, a module with a single purpose. Right-click the file in the editor or in the Explorer and choose **Lugus: Link Whole File to a Rule (Sidecar)**.
+
+- Works with **any file type** (JSON, YAML, Markdown, shaders…): the region is the whole file, so no language support is needed.
+- **Any change to the file** marks it *code edited by hand*: Accept, Restore and Update work as usual. Update asks the model for the entire file, so above 300 lines Lugus asks first (if the output is cut off, nothing is applied).
+- **It guides everything inside the file.** When you update a function rule or an inline block in that file, the file rule is sent to the model as a constraint ("pure math helpers: no I/O" keeps a later update from adding a log call).
+
+To keep rules to yourself instead of sharing them, add `.lugus/` to your `.gitignore`.
 
 ### Comment prefixes
 
@@ -107,7 +146,7 @@ Lugus requires VS Code 1.90 or later. Check [GitHub Releases](https://github.com
 Open the Command Palette and run **Extensions: Install from VSIX...**, then select the package, or from a terminal:
 
 ```bash
-code --install-extension lugus-0.2.0.vsix
+code --install-extension lugus-0.3.0.vsix
 ```
 
 ## Choose a provider
@@ -164,16 +203,6 @@ CI runs all of the above on Linux and Windows for every push and pull request, t
 Press **F5** in VS Code to build and start an Extension Development Host. To create an installable package, run `npx @vscode/vsce package`.
 
 The parsing, fingerprint, drift and prompt logic lives in `src/core/` and has no VS Code dependency. The extension (`src/extension.ts` and friends) and the CLI (`src/cli.ts`) are thin layers on top of it.
-
-## Roadmap
-
-- [x] Re-compilable linked blocks with Detach
-- [x] Project conventions through `.lugusrc`
-- [x] Link existing code to a rule
-- [x] Drift detection: rule and code fingerprints, block status, Accept
-- [x] Updates edit the current code minimally, always behind a diff review
-- [x] Drift in the Problems panel, workspace overview and `lugus check` CLI
-- [ ] Sidecar mode: keep rules in `.lugus/` instead of in the source, so shared code stays clean ([design](docs/design/sidecar-mode.md))
 
 ## License
 

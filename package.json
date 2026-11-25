@@ -2,7 +2,7 @@
   "name": "lugus",
   "displayName": "Lugus",
   "description": "Keep the rule next to the code it implements. Lugus turns natural-language rules into code, updates that code when the rule changes, and tells you when the two drift apart.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "daevis-it",
   "license": "MIT",
   "repository": {
@@ -42,7 +42,15 @@
       },
       {
         "command": "lugus.linkSelection",
-        "title": "Lugus: Link Selected Code to a Rule"
+        "title": "Lugus: Link Selection to a Rule (Inline)"
+      },
+      {
+        "command": "lugus.linkSymbol",
+        "title": "Lugus: Link Function to a Rule (Sidecar)"
+      },
+      {
+        "command": "lugus.linkFile",
+        "title": "Lugus: Link Whole File to a Rule (Sidecar)"
       },
       {
         "command": "lugus.accept",
@@ -63,6 +71,42 @@
       {
         "command": "lugus.setApiKey",
         "title": "Lugus: Set API Key"
+      },
+      {
+        "command": "lugus.sidecar.editRule",
+        "title": "Lugus: Edit Sidecar Rule"
+      },
+      {
+        "command": "lugus.sidecar.openRules",
+        "title": "Lugus: Open Sidecar Rules File"
+      },
+      {
+        "command": "lugus.moveToSidecar",
+        "title": "Lugus: Move Block to Sidecar"
+      },
+      {
+        "command": "lugus.moveInline",
+        "title": "Lugus: Move Sidecar Rule Inline"
+      },
+      {
+        "command": "lugus.sidecar.update",
+        "title": "Lugus: Update Code (Sidecar Rule)"
+      },
+      {
+        "command": "lugus.sidecar.accept",
+        "title": "Lugus: Accept (Sidecar Rule)"
+      },
+      {
+        "command": "lugus.sidecar.restore",
+        "title": "Lugus: Restore (Sidecar Rule)"
+      },
+      {
+        "command": "lugus.sidecar.detach",
+        "title": "Lugus: Delete Sidecar Rule"
+      },
+      {
+        "command": "lugus.sidecar.reattach",
+        "title": "Lugus: Re-attach Sidecar Rule"
       }
     ],
     "menus": {
@@ -71,6 +115,45 @@
           "command": "lugus.linkSelection",
           "when": "editorHasSelection && !editorReadonly",
           "group": "1_modification@90"
+        },
+        {
+          "command": "lugus.linkSymbol",
+          "when": "!editorReadonly && resourceScheme == file",
+          "group": "1_modification@91"
+        },
+        {
+          "command": "lugus.linkFile",
+          "when": "!editorReadonly && resourceScheme == file",
+          "group": "1_modification@92"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "lugus.sidecar.update",
+          "when": "false"
+        },
+        {
+          "command": "lugus.sidecar.accept",
+          "when": "false"
+        },
+        {
+          "command": "lugus.sidecar.restore",
+          "when": "false"
+        },
+        {
+          "command": "lugus.sidecar.detach",
+          "when": "false"
+        },
+        {
+          "command": "lugus.sidecar.reattach",
+          "when": "false"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "lugus.linkFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "7_modification@90"
         }
       ]
     },

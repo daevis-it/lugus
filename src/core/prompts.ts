@@ -18,6 +18,8 @@ export interface PromptInput {
   contextBefore: string;
   contextAfter: string;
   projectRules?: string | null;
+  /** Rule of the whole file this block lives in (sidecar file rule), sent as a constraint. */
+  fileRule?: string;
 }
 
 export interface BuiltPrompt {
@@ -61,6 +63,14 @@ export function buildPrompt(input: PromptInput): BuiltPrompt {
         'Do NOT add imports/using statements or outer class/function wrappers unless the rule asks for them.',
         'Match variable names and coding style from the surrounding context when provided.'
       ])
+    );
+  }
+
+  if (input.fileRule) {
+    lines.push(
+      '',
+      'The whole file this code belongs to follows this rule. Your code must not contradict it:',
+      input.fileRule
     );
   }
 

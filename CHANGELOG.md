@@ -1,16 +1,21 @@
 # Changelog
 
-## Unreleased (0.3.0)
+## 0.3.0
 
 ### Added
+- **Sidecar mode.** Rules can live in `.lugus/rules/<source path>.json` instead of in the source, anchored to a function, method or class through the language's symbol provider. Right-click inside a function, method or class and choose **Lugus: Link Function to a Rule (Sidecar)**. Status, Update Code, Accept, Restore, quick fixes and the Problems panel work as for inline blocks; **Edit Rule** changes the rule. Renamed or deleted symbols make the rule *orphaned* (Re-attach or Delete); renamed files take their rules with them. **Move Block to Sidecar** / **Move Sidecar Rule Inline** switch a rule between the two storages, keeping its fingerprints.
+- **Whole-file rules** (sidecar): **Link Whole File to a Rule** from the editor or the Explorer, for any file type. The whole file is tracked, and the file rule is sent to the model as a constraint whenever code inside the file is updated.
 - **Drift in the Problems panel.** Drifted and not-verified blocks are reported as diagnostics, with **Update code** and **Accept** as quick fixes. Severity is configurable with `lugus.driftSeverity` (`warning` by default, or `information`, `hint`, `off`).
 - **Lugus: Show Blocks to Review** scans the workspace and lists every block whose rule and code are out of sync. Selecting one opens it.
-- **`lugus check` CLI** for pre-commit hooks and CI: `npm install -g github:daevis-it/lugus`, then `lugus check [paths] [--json] [--strict]`. Exits with 1 when a block has drifted.
+- **`lugus check` CLI** (inline blocks and sidecar rules) for pre-commit hooks and CI: `npm install -g github:daevis-it/lugus`, then `lugus check [paths] [--json] [--strict]`. Exits with 1 when a block has drifted.
 - **Restore.** Puts back the code as it was when it last matched the rule, without calling the model and behind a diff review. Lugus keeps a local copy of every aligned version it sees; if none is found it uses the last git commit. Available from CodeLens, quick fixes and the Command Palette.
 - GitHub Actions CI: typecheck, unit tests, end-to-end smoke test and `lugus check` on Linux and Windows, plus a packaged `.vsix` artifact.
 
 ### Fixed
 - **Re-align to Rule** on hand-edited code silently accepted the edits when the model found nothing to change. Lugus now asks: accept the current code, or restore the last aligned version.
+
+### Changed
+- **Link Selected Code to a Rule** is now **Link Selection to a Rule (Inline)**, next to the new **Link Function to a Rule (Sidecar)** in the right-click menu.
 
 ### Removed
 - The "logic check" roadmap item. Lugus stays focused on keeping rules and code aligned.

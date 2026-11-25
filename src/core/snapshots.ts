@@ -21,6 +21,8 @@ interface Entry {
 }
 
 const STORE_KEY = 'lugus.alignedSnapshots';
+/** Bigger code (e.g. a large file under a file rule) is not cached: git is the fallback for it. */
+const MAX_SNAPSHOT_CHARS = 200_000;
 
 export class SnapshotStore {
   constructor(
@@ -35,7 +37,7 @@ export class SnapshotStore {
 
   /** Remembers `code` as an aligned version. Cheap no-op when already stored. */
   public async remember(code: string): Promise<void> {
-    if (!code.trim()) {
+    if (!code.trim() || code.length > MAX_SNAPSHOT_CHARS) {
       return;
     }
     const key = hashCode(code);

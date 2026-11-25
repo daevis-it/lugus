@@ -7,7 +7,7 @@ import { splitLines } from './text';
  */
 
 /** States where the rule and the code no longer match what Lugus recorded. */
-export const DRIFT_STATES: ReadonlySet<BlockState> = new Set(['rule-changed', 'code-edited', 'both-changed']);
+export const DRIFT_STATES: ReadonlySet<BlockState> = new Set(['rule-changed', 'code-edited', 'both-changed', 'orphaned']);
 
 export function isDrift(state: BlockState): boolean {
   return DRIFT_STATES.has(state);
@@ -28,6 +28,8 @@ export function describeState(state: BlockState): string {
       return 'not verified';
     case 'unlinked':
       return 'not translated yet';
+    case 'orphaned':
+      return 'orphaned rule';
   }
 }
 
@@ -42,6 +44,8 @@ export function adviseState(state: BlockState): string {
       return 'Both the rule and the code were edited. Update the code or accept both as aligned.';
     case 'unverified':
       return 'This marker has no fingerprints (older Lugus version). Accept it once to start tracking drift.';
+    case 'orphaned':
+      return 'The function or method this rule was attached to no longer exists. Re-attach the rule or delete it.';
     default:
       return '';
   }

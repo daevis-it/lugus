@@ -1,6 +1,12 @@
 # Sidecar mode: rules without markers in the source
 
-Status: proposed for 0.3.0. Not implemented in 0.2.0.
+Status: implemented in 0.3.0
+
+- **Symbol anchors only.** Range anchors for code inside a function were dropped: the end of an edited range can only be guessed, and a wrong guess would make Update or Restore replace the wrong lines. Sub-function rules stay inline. The recorded first line, line count and fingerprint are still used to compute the status when no symbol provider is available (CLI, language server loading), but never to edit code.
+- **No `sidecar-local` setting.** Adding `.lugus/` to `.gitignore` does the same with no extra concept.
+- **Rule editing** uses an input box (single line); multi-line rules are edited in the JSON file (**Open Sidecar Rules File**).
+- **Whole-file rules** were added (`"kind": "File"`, empty symbol): the region is the whole file, so they need no symbol provider and work for any file type. A file rule is also sent to the model as a constraint when code inside the file is updated.
+- **Migration** is per block (Move Block to Sidecar / Move Sidecar Rule Inline). A per-file or workspace-wide move can be added on top if needed.
 
 ## Problem
 
@@ -74,12 +80,12 @@ Unchanged from inline mode. `src/core/blocks.ts` already separates the fingerpri
 
 ### Settings and migration
 
-- `lugus.storage`: `"inline"` (default) | `"sidecar"` | `"sidecar-local"` (option B: `.lugus/` added to `.git/info/exclude`, rules never leave the machine).
-- Commands **Move Rules to Sidecar** and **Move Rules Inline**, per file or per workspace, so a solo project can start inline and move to sidecar when shared.
+- Two explicit commands, both in the right-click menu: **Link Selection to a Rule (Inline)** and **Link Function to a Rule (Sidecar)**. A `lugus.storage` setting was tried and dropped: a hidden setting silently changing what Link does was confusing.
+- **Move Block to Sidecar** and **Move Sidecar Rule Inline**, per block, keeping fingerprints, so a solo project can start inline and move to sidecar when shared.
 
 ### Team workflow
 
-- CI check: `lugus check` (shipped in 0.3.0 for inline blocks) will read `.lugus/` too and report orphaned rules alongside drifted ones, without needing VS Code.
+- CI check: `lugus check` reads `.lugus/rules` at the repository root and reports drifted and orphaned rules (source file gone, or recorded code no longer found) without needing VS Code.
 - A drifted rule is information, not an error: the team decides whether to accept the code or update it.
 
 ## Out of scope

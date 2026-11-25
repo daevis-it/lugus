@@ -98,14 +98,22 @@ export function extractLocalContext(
   block: CommentBlock,
   contextLines: number
 ): { before: string; after: string } {
+  return contextAround(document, block.promptStart, blockEnd(block), contextLines);
+}
+
+/** Up to `contextLines` lines before `startLine` and after `endLine`. */
+export function contextAround(
+  document: vscode.TextDocument,
+  startLine: number,
+  endLine: number,
+  contextLines: number
+): { before: string; after: string } {
   if (contextLines <= 0) {
     return { before: '', after: '' };
   }
   const lines = documentLines(document);
-  const start = Math.max(0, block.promptStart - contextLines);
-  const end = blockEnd(block);
   return {
-    before: lines.slice(start, block.promptStart).join('\n'),
-    after: lines.slice(end + 1, Math.min(lines.length, end + 1 + contextLines)).join('\n')
+    before: lines.slice(Math.max(0, startLine - contextLines), startLine).join('\n'),
+    after: lines.slice(endLine + 1, Math.min(lines.length, endLine + 1 + contextLines)).join('\n')
   };
 }

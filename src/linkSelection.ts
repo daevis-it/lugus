@@ -57,7 +57,7 @@ export async function linkSelection(): Promise<void> {
 
   const version = document.version;
   const rule = await vscode.window.showInputBox({
-    title: 'Lugus: Link Selected Code',
+    title: 'Lugus: Link Selection to a Rule (Inline)',
     prompt: 'Describe, in your own words, the rule this code implements. You can add more //> lines later.',
     ignoreFocusOut: true,
     validateInput: (value) => (value.trim() ? undefined : 'Enter the rule for this code.')

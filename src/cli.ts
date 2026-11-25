@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { BlockState } from './core/blocks';
 import { checkText, commentTokenForFile, describeState, isDrift, mayContainBlocks } from './core/check';
+import { entryStateWithoutSymbols, parseSidecar, SIDECAR_DIR, sourcePathFor } from './core/sidecar';
+import { splitLines } from './core/text';
 
 /**
  * `lugus check`: reports Lugus blocks whose rule and code have drifted apart.
@@ -35,7 +37,8 @@ const SKIP_DIRS = new Set([
 
 const HELP = `Usage: lugus check [paths...] [--json] [--strict]
 
-Reports Lugus blocks whose rule and code no longer match.
+Reports Lugus blocks whose rule and code no longer match: inline blocks
+in the sources and sidecar rules in .lugus/rules.
 
   paths      Files or folders to check (default: current folder).
              Inside a git repository, ignored files are skipped.
@@ -55,6 +58,7 @@ export interface Finding {
   line: number;
   state: BlockState;
   rule: string;
+  storage: 'inline' | 'sidecar';
 }
 
 export function run(argv: string[], io: CliIO): number {
@@ -106,7 +110,42 @@ export function run(argv: string[], io: CliIO): number {
     for (const report of checkText(text, commentTokenForFile(file, text))) {
       checked++;
       if (isDrift(report.state) || report.state === 'unverified') {
-        findings.push({ file: display, line: report.line + 1, state: report.state, rule: report.rule.join(' ') });
+        findings.push({ file: display, line: report.line + 1, state: report.state, rule: report.rule.join(' '), storage: 'inline' });
+      }
+    }
+  }
+
+  // Sidecar rules (.lugus/rules at the repository root), for sources inside the targets.
+  const root = repositoryRoot(io.cwd);
+  const absoluteTargets = targets.map((t) => path.resolve(io.cwd, t));
+  const inTargets = (file: string) =>
+    absoluteTargets.some((t) => file === t || file.startsWith(t.endsWith(path.sep) ? t : t + path.sep));
+  let unreadable = 0;
+  for (const json of walk(path.join(root, ...SIDECAR_DIR.split('/'))).filter((f) => f.endsWith('.json')).sort()) {
+    const sourceRel = sourcePathFor(path.relative(root, json).split(path.sep).join('/'));
+    if (!sourceRel) {
+      continue;
+    }
+    const source = path.join(root, ...sourceRel.split('/'));
+    if (!inTargets(source) && !inTargets(json)) {
+      continue;
+    }
+    const display = path.relative(io.cwd, source).split(path.sep).join('/');
+    let entries;
+    try {
+      entries = parseSidecar(fs.readFileSync(json, 'utf8')).blocks;
+    } catch (err) {
+      unreadable++;
+      io.err(`lugus: cannot read ${path.relative(io.cwd, json).split(path.sep).join('/')}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    const text = readText(source);
+    const lines = text === null ? null : splitLines(text);
+    for (const entry of entries) {
+      checked++;
+      const { state, line } = entryStateWithoutSymbols(entry, lines);
+      if (isDrift(state)) {
+        findings.push({ file: display, line: line + 1, state, rule: entry.rule.join(' '), storage: 'sidecar' });
       }
     }
   }
@@ -118,7 +157,7 @@ export function run(argv: string[], io: CliIO): number {
   } else {
     for (const f of findings) {
       const rule = f.rule.length > 72 ? `${f.rule.slice(0, 71)}…` : f.rule;
-      io.out(`${f.file}:${f.line}  ${describeState(f.state)}  "${rule}"`);
+      io.out(`${f.file}:${f.line}  ${describeState(f.state)}  "${rule}"${f.storage === 'sidecar' ? '  (sidecar)' : ''}`);
     }
     const drifted = findings.filter((f) => isDrift(f.state)).length;
     const unverified = findings.length - drifted;
@@ -128,7 +167,20 @@ export function run(argv: string[], io: CliIO): number {
     }
     io.out(`lugus: ${parts.join(', ')}.`);
   }
-  return failing.length ? 1 : 0;
+  return failing.length || unreadable ? 1 : 0;
+}
+
+/** Top of the git repository containing `cwd`, or `cwd` itself. */
+function repositoryRoot(cwd: string): string {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    return cwd;
+  }
 }
 
 /** Files under `dir`: git-tracked and untracked-but-not-ignored when possible, else a filtered walk. */

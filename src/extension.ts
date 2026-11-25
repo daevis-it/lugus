@@ -1,37 +1,90 @@
-import { execFile } from 'child_process';
-import * as path from 'path';
 import * as vscode from 'vscode';
-import { BlockMode, composeBlock, formatMarker } from './core/blocks';
-import { buildPrompt, TranslationMode } from './core/prompts';
+import { blockEnd, BlockMode, composeBlock, formatMarker } from './core/blocks';
+import { TranslationMode } from './core/prompts';
 import { findCodeByHash, SnapshotStore } from './core/snapshots';
 import { applyIndentation, canonicalCode, commonIndent, dedent } from './core/text';
-import {
-  Provider,
-  ResolvedProviderConfig,
-  requestCode,
-  resolveProviderConfig,
-  validateApiKeyForProvider
-} from './aiClient';
-import { CommentBlock, extractLocalContext, getBlockAt, relocateBlock } from './commentParser';
+import { CommentBlock, getBlockAt, relocateBlock } from './commentParser';
 import { LugusCodeLensProvider } from './codeLensProvider';
 import { DriftMonitor, showDriftedBlocks } from './drift';
+import { editorFor, readCommittedVersion, reportError, UserFacingError, wholeLines, withEol } from './editorUtils';
 import { linkSelection } from './linkSelection';
-import { loadProjectRules } from './projectRules';
+import { API_KEY_SECRET, ModelClient } from './model';
 import { reviewReplacement } from './reviewReplacement';
-
-const API_KEY_SECRET = 'lugus.apiKey';
+import { Sidecar } from './sidecar';
+import { SidecarCommands } from './sidecarCommands';
 
 interface Target {
   editor: vscode.TextEditor;
   line: number;
+  /** True when invoked from CodeLens / quick fix with an explicit position. */
+  explicit: boolean;
 }
 
-class UserFacingError extends Error {}
-
 export function activate(context: vscode.ExtensionContext): void {
-  const codeLens = new LugusCodeLensProvider();
   const snapshots = new SnapshotStore(context.workspaceState);
-  const drift = new DriftMonitor(snapshots);
+  const sidecar = new Sidecar();
+  const model = new ModelClient(context.secrets);
+  const codeLens = new LugusCodeLensProvider(sidecar);
+  const drift = new DriftMonitor(snapshots, sidecar);
+  /** One model request per document at a time: edits would race otherwise. */
+  const busyDocuments = new Set<string>();
+  const sidecarCommands = new SidecarCommands(sidecar, snapshots, model, busyDocuments, () => codeLens.refresh());
+
+  const loading = vscode.window.createTextEditorDecorationType({
+    after: {
+      contentText: '  ⟳ Lugus is working…',
+      color: new vscode.ThemeColor('editorCodeLens.foreground'),
+      fontStyle: 'italic'
+    }
+  });
+
+  /**
+   * Inline commands are called from CodeLens as (uri, line), from the keybinding
+   * and the palette with no arguments (cursor position is used).
+   */
+  async function resolveTarget(uriArg?: unknown, lineArg?: unknown): Promise<Target | null> {
+    if (uriArg instanceof vscode.Uri && typeof lineArg === 'number') {
+      const editor =
+        vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === uriArg.toString()) ??
+        (await vscode.window.showTextDocument(uriArg));
+      return { editor, line: lineArg, explicit: true };
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return null;
+    }
+    return {
+      editor,
+      line: typeof uriArg === 'number' ? uriArg : editor.selection.active.line,
+      explicit: typeof uriArg === 'number'
+    };
+  }
+
+  /**
+   * The inline block at the target. Without one, at the cursor, the command
+   * falls through to the sidecar rule of the symbol there (if any).
+   */
+  async function inlineBlockOrSidecar(
+    uriArg: unknown,
+    lineArg: unknown,
+    sidecarCommand: string,
+    emptyMessage: string
+  ): Promise<{ editor: vscode.TextEditor; block: CommentBlock } | null> {
+    const target = await resolveTarget(uriArg, lineArg);
+    if (!target) {
+      return null;
+    }
+    const block = getBlockAt(target.editor.document, target.line);
+    if (block) {
+      return { editor: target.editor, block };
+    }
+    if (!target.explicit && (await sidecarCommands.hasRuleAt(target.editor.document, target.line))) {
+      await vscode.commands.executeCommand(sidecarCommand);
+      return null;
+    }
+    vscode.window.setStatusBarMessage(emptyMessage, 4000);
+    return null;
+  }
 
   /** The code as it was when the block was last aligned: local snapshot first, then the committed file. */
   async function findAlignedCode(document: vscode.TextDocument, block: CommentBlock): Promise<string | undefined> {
@@ -71,67 +124,6 @@ export function activate(context: vscode.ExtensionContext): void {
     const editor = await editorFor(document);
     return editor.edit((edit) => edit.replace(current.fullRange, withEol(document, finalText)));
   }
-  const loading = vscode.window.createTextEditorDecorationType({
-    after: {
-      contentText: '  ⟳ Lugus is working…',
-      color: new vscode.ThemeColor('editorCodeLens.foreground'),
-      fontStyle: 'italic'
-    }
-  });
-  /** One model request per document at a time: edits would race otherwise. */
-  const busyDocuments = new Set<string>();
-
-  /**
-   * Commands are called from CodeLens as (uri, line), from the keybinding and
-   * the palette with no arguments (cursor position is used).
-   */
-  async function resolveTarget(uriArg?: unknown, lineArg?: unknown): Promise<Target | null> {
-    if (uriArg instanceof vscode.Uri && typeof lineArg === 'number') {
-      const editor =
-        vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === uriArg.toString()) ??
-        (await vscode.window.showTextDocument(uriArg));
-      return { editor, line: lineArg };
-    }
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      return null;
-    }
-    return { editor, line: typeof uriArg === 'number' ? uriArg : editor.selection.active.line };
-  }
-
-  async function blockAtTarget(uriArg: unknown, lineArg: unknown, emptyMessage: string) {
-    const target = await resolveTarget(uriArg, lineArg);
-    if (!target) {
-      return null;
-    }
-    const block = getBlockAt(target.editor.document, target.line);
-    if (!block) {
-      vscode.window.setStatusBarMessage(emptyMessage, 4000);
-      return null;
-    }
-    return { editor: target.editor, block };
-  }
-
-  async function getApiKey(config: ResolvedProviderConfig): Promise<string | undefined | null> {
-    let apiKey = await context.secrets.get(API_KEY_SECRET);
-    if (config.requiresApiKey && !apiKey) {
-      const choice = await vscode.window.showWarningMessage(
-        `Lugus: no API key configured for provider '${config.provider}'.`,
-        'Set API Key'
-      );
-      if (choice === 'Set API Key') {
-        await vscode.commands.executeCommand('lugus.setApiKey');
-        apiKey = await context.secrets.get(API_KEY_SECRET);
-      }
-      if (!apiKey) {
-        return null;
-      }
-    }
-    if (apiKey) {
-      validateApiKeyForProvider(config.provider, apiKey);
-    }
-    return apiKey;
-  }
 
   // ---------------------------------------------------------------- Set key
 
@@ -157,10 +149,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // ---------------------------------------------------- Translate / Update
 
   const translate = vscode.commands.registerCommand('lugus.translate', async (uriArg?: unknown, lineArg?: unknown) => {
-    const found = await blockAtTarget(
+    const found = await inlineBlockOrSidecar(
       uriArg,
       lineArg,
-      'Lugus: place the cursor on a //> rule or inside a linked block.'
+      'lugus.sidecar.update',
+      'Lugus: place the cursor on a //> rule, inside a linked block, or in a symbol with a sidecar rule.'
     );
     if (!found) {
       return;
@@ -188,53 +181,27 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
 
-    const settings = vscode.workspace.getConfiguration('lugus');
-    const blockMode = settings.get<BlockMode>('blockMode', 'linked');
-    const contextLines = settings.get<number>('contextLines', 20);
-    const timeoutMs = settings.get<number>('timeoutMs', 60000);
-    const language = settings.get<string>('languageOverride', '').trim() || document.languageId;
-
+    const blockMode = vscode.workspace.getConfiguration('lugus').get<BlockMode>('blockMode', 'linked');
     busyDocuments.add(docKey);
     editor.setDecorations(loading, [new vscode.Range(block.ruleRange.end, block.ruleRange.end)]);
     try {
-      const provider = resolveProviderConfig(
-        settings.get<Provider>('provider', 'anthropic'),
-        settings.get<string>('baseUrl', ''),
-        settings.get<string>('model', '')
-      );
-      const apiKey = await getApiKey(provider);
-      if (apiKey === null) {
-        return;
-      }
-
       const hasCode = block.markerLine !== null && block.body.some((line) => line.trim());
       const mode: TranslationMode = hasCode ? 'update' : 'generate';
       const currentCode = block.body.join('\n');
       const baseIndent = hasCode ? commonIndent(block.body) : block.indent;
 
-      const localContext = extractLocalContext(document, block, contextLines);
-      const prompt = buildPrompt({
+      const generated = await model.generate({
+        document,
         mode,
-        language,
         rule,
         currentCode: hasCode ? dedent(currentCode) : undefined,
-        contextBefore: localContext.before,
-        contextAfter: localContext.after,
-        projectRules: await loadProjectRules(document)
+        blockStart: block.promptStart,
+        blockEnd: blockEnd(block),
+        fileRule: await sidecar.fileRule(document.uri)
       });
-
-      const generated = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Window,
-          title: mode === 'update' ? 'Lugus: updating code…' : 'Lugus: translating…',
-          cancellable: true
-        },
-        (_progress, cancel) => {
-          const controller = new AbortController();
-          cancel.onCancellationRequested(() => controller.abort());
-          return requestCode({ config: provider, apiKey, prompt, timeoutMs, signal: controller.signal });
-        }
-      );
+      if (generated === null) {
+        return;
+      }
       const newCode = applyIndentation(generated, baseIndent);
 
       let current = relocateBlock(document, block);
@@ -302,7 +269,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await snapshots.remember(newCode);
       }
     } catch (err: unknown) {
-      reportError(err, timeoutMs);
+      reportError(err, model.timeoutMs());
     } finally {
       busyDocuments.delete(docKey);
       editor.setDecorations(loading, []);
@@ -313,7 +280,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // ------------------------------------------------------------------ Accept
 
   const accept = vscode.commands.registerCommand('lugus.accept', async (uriArg?: unknown, lineArg?: unknown) => {
-    const found = await blockAtTarget(uriArg, lineArg, 'Lugus: place the cursor inside a linked block.');
+    const found = await inlineBlockOrSidecar(uriArg, lineArg, 'lugus.sidecar.accept', 'Lugus: place the cursor inside a linked block.');
     if (!found) {
       return;
     }
@@ -330,7 +297,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // ----------------------------------------------------------------- Restore
 
   const restore = vscode.commands.registerCommand('lugus.restore', async (uriArg?: unknown, lineArg?: unknown) => {
-    const found = await blockAtTarget(uriArg, lineArg, 'Lugus: place the cursor inside a linked block.');
+    const found = await inlineBlockOrSidecar(uriArg, lineArg, 'lugus.sidecar.restore', 'Lugus: place the cursor inside a linked block.');
     if (!found) {
       return;
     }
@@ -349,7 +316,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       await restoreBlock(editor.document, block, code);
     } catch (err: unknown) {
-      reportError(err, 0);
+      reportError(err);
     } finally {
       codeLens.refresh();
     }
@@ -358,7 +325,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // ------------------------------------------------------------------ Detach
 
   const detach = vscode.commands.registerCommand('lugus.detach', async (uriArg?: unknown, lineArg?: unknown) => {
-    const found = await blockAtTarget(uriArg, lineArg, 'Lugus: place the cursor inside a linked block.');
+    const found = await inlineBlockOrSidecar(uriArg, lineArg, 'lugus.sidecar.detach', 'Lugus: place the cursor inside a linked block.');
     if (!found) {
       return;
     }
@@ -381,42 +348,70 @@ export function activate(context: vscode.ExtensionContext): void {
     codeLens.refresh();
   });
 
+  // -------------------------------------------------------------------- Link
+
+  /** Inline: rule above the selected lines, marker below. */
+  const link = vscode.commands.registerCommand('lugus.linkSelection', async () => {
+    try {
+      await linkSelection();
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      codeLens.refresh();
+    }
+  });
+
+  /** Sidecar: rule for the whole file (from the editor, or a file in the Explorer). */
+  const linkFile = vscode.commands.registerCommand('lugus.linkFile', async (uriArg?: unknown) => {
+    try {
+      await sidecarCommands.linkFile(uriArg);
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      codeLens.refresh();
+    }
+  });
+
+  /** Sidecar: rule attached to the function, method or class at the cursor, stored in .lugus/rules. */
+  const linkSymbol = vscode.commands.registerCommand('lugus.linkSymbol', async () => {
+    try {
+      await sidecarCommands.link();
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      codeLens.refresh();
+    }
+  });
+
   context.subscriptions.push(
     loading,
     codeLens,
     drift,
+    sidecar,
+    vscode.languages.registerCodeLensProvider([{ scheme: 'file' }, { scheme: 'untitled' }], codeLens),
     vscode.languages.registerCodeActionsProvider([{ scheme: 'file' }, { scheme: 'untitled' }], drift, {
       providedCodeActionKinds: DriftMonitor.providedCodeActionKinds
     }),
-    vscode.commands.registerCommand('lugus.showDrifted', () => showDriftedBlocks(drift)),
-    vscode.languages.registerCodeLensProvider([{ scheme: 'file' }, { scheme: 'untitled' }], codeLens),
+    sidecar.onDidChange(() => codeLens.refresh()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('lugus')) {
         codeLens.refresh();
       }
     }),
+    vscode.commands.registerCommand('lugus.showDrifted', () => showDriftedBlocks(drift)),
     setApiKey,
     translate,
     accept,
     restore,
     detach,
-    vscode.commands.registerCommand('lugus.linkSelection', async () => {
-      await linkSelection();
-      codeLens.refresh();
-    })
+    link,
+    linkSymbol,
+    linkFile,
+    ...sidecarCommands.register()
   );
 }
 
 export function deactivate(): void {}
-
-// ------------------------------------------------------------------ helpers
-
-async function editorFor(document: vscode.TextDocument): Promise<vscode.TextEditor> {
-  return (
-    vscode.window.visibleTextEditors.find((e) => e.document === document) ??
-    (await vscode.window.showTextDocument(document, { preserveFocus: false }))
-  );
-}
 
 /** Rewrites the marker with fingerprints of the current rule and code. No model call. */
 async function restampMarker(editor: vscode.TextEditor, block: CommentBlock): Promise<boolean> {
@@ -430,52 +425,4 @@ async function restampMarker(editor: vscode.TextEditor, block: CommentBlock): Pr
     return true;
   }
   return editor.edit((edit) => edit.replace(line.range, marker));
-}
-
-/** Range covering whole lines `from`..`to`, including one line break. */
-function wholeLines(document: vscode.TextDocument, from: number, to: number): vscode.Range {
-  if (to + 1 < document.lineCount) {
-    return new vscode.Range(from, 0, to + 1, 0);
-  }
-  if (from > 0) {
-    return new vscode.Range(document.lineAt(from - 1).range.end, document.lineAt(to).range.end);
-  }
-  return new vscode.Range(0, 0, to, document.lineAt(to).text.length);
-}
-
-/** The file as committed at HEAD, or undefined outside git / when untracked. */
-function readCommittedVersion(uri: vscode.Uri): Promise<string | undefined> {
-  if (uri.scheme !== 'file') {
-    return Promise.resolve(undefined);
-  }
-  return new Promise((resolve) => {
-    try {
-      execFile(
-        'git',
-        ['show', `HEAD:./${path.basename(uri.fsPath)}`],
-        { cwd: path.dirname(uri.fsPath), timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' },
-        (error, stdout) => resolve(error ? undefined : stdout)
-      );
-    } catch {
-      resolve(undefined); // git missing or folder gone: no fallback, not an error
-    }
-  });
-}
-
-function withEol(document: vscode.TextDocument, text: string): string {
-  return document.eol === vscode.EndOfLine.CRLF ? text.replace(/\n/g, '\r\n') : text;
-}
-
-function reportError(err: unknown, timeoutMs: number): void {
-  if (err instanceof Error && err.name === 'AbortError') {
-    vscode.window.setStatusBarMessage('Lugus: request cancelled.', 3000);
-    return;
-  }
-  const message =
-    err instanceof Error && err.name === 'TimeoutError'
-      ? `Request timed out after ${timeoutMs} ms. Increase 'lugus.timeoutMs' for slow or local models.`
-      : err instanceof Error
-        ? err.message
-        : String(err);
-  vscode.window.showErrorMessage(`Lugus: ${message}`);
 }

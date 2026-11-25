@@ -15,7 +15,7 @@ class Uri {
   get fsPath() { return this.path; }
   static from({ scheme, path }) { return new Uri(scheme, path); }
   static file(p) { return new Uri('file', p); }
-  static joinPath(u, ...parts) { return new Uri(u.scheme, [u.path, ...parts].join('/')); }
+  static joinPath(u, ...parts) { return new Uri(u.scheme, require('path').posix.normalize([u.path, ...parts].join('/'))); }
   with({ path }) { return new Uri(this.scheme, path ?? this.path); }
 }
 class EventEmitter {
@@ -35,9 +35,50 @@ const diagnostics = new Map();
 const docListeners = { open: [], change: [] };
 const files = new Map(); // fake disk: uri string -> { uri, text, languageId }
 const openDocs = [];
+const fsLog = [];
+const renameListeners = [];
+const symbolProvider = { enabled: true };
+
+// SymbolKind with the reverse mapping a real TS enum has.
+const SymbolKind = {};
+['File','Module','Namespace','Package','Class','Method','Property','Field','Constructor','Enum','Interface','Function','Variable','Constant','String','Number','Boolean','Array','Object','Key','Null','EnumMember','Struct','Event','Operator','TypeParameter']
+  .forEach((name, i) => { SymbolKind[name] = i; SymbolKind[i] = name; });
+
+/** Tiny C#-like symbol provider: classes and methods, ranges by brace matching. */
+function computeSymbols(doc) {
+  const lines = doc.lines;
+  const endOf = (start) => {
+    let depth = 0, seen = false;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) {
+        if (ch === '{') { depth++; seen = true; }
+        if (ch === '}') { depth--; if (seen && depth === 0) return i; }
+      }
+    }
+    return lines.length - 1;
+  };
+  const roots = [];
+  const stack = [];
+  lines.forEach((line, i) => {
+    const cls = /^\s*(?:public |private |internal |static |sealed )*class (\w+)/.exec(line);
+    const method = /^\s*(?:[\w<>\[\],]+\s+)+(\w+)\s*\([^)]*\)\s*\{?\s*$/.exec(line);
+    let sym = null;
+    if (cls) sym = { name: cls[1], kind: SymbolKind.Class };
+    else if (method && !['if', 'for', 'while', 'switch', 'catch', 'return', 'foreach', 'using'].includes(method[1])) sym = { name: method[1], kind: SymbolKind.Method };
+    if (!sym) return;
+    const end = endOf(i);
+    sym.range = new Range(i, 0, end, lines[end].length);
+    sym.selectionRange = sym.range;
+    sym.children = [];
+    while (stack.length && stack[stack.length - 1].range.end.line < i) stack.pop();
+    (stack.length ? stack[stack.length - 1].children : roots).push(sym);
+    stack.push(sym);
+  });
+  return roots;
+}
 
 const log = { info: [], warn: [], error: [], status: [], diffs: [], quickPick: [] };
-const answers = { info: [], input: [], quickPick: [] };
+const answers = { info: [], input: [], quickPick: [], warn: [] };
 const settings = {};
 const commands = new Map();
 let codeLensProvider = null;
@@ -101,7 +142,7 @@ const window = {
   get visibleTextEditors() { return this.activeTextEditor ? [this.activeTextEditor] : []; },
   createTextEditorDecorationType: () => ({ dispose() {} }),
   showInformationMessage: async (msg, ...items) => { log.info.push(msg); return items.length ? answers.info.shift() : undefined; },
-  showWarningMessage: async (msg) => { log.warn.push(msg); return undefined; },
+  showWarningMessage: async (msg, ...items) => { log.warn.push(msg); return items.some((i) => typeof i === 'string') ? answers.warn.shift() : undefined; },
   showErrorMessage: async (msg) => { log.error.push(msg); return undefined; },
   setStatusBarMessage: (msg) => { log.status.push(msg); return { dispose() {} }; },
   showInputBox: async () => answers.input.shift(),
@@ -122,11 +163,19 @@ const workspace = {
   onDidChangeConfiguration: () => ({ dispose() {} }),
   onDidOpenTextDocument: (fn) => { docListeners.open.push(fn); return { dispose() {} }; },
   onDidChangeTextDocument: (fn) => { docListeners.change.push(fn); return { dispose() {} }; },
-  onDidRenameFiles: () => ({ dispose() {} }),
-  createFileSystemWatcher: () => ({ onDidChange: () => ({ dispose() {} }), onDidDelete: () => ({ dispose() {} }), dispose() {} }),
+  onDidRenameFiles: (fn) => { renameListeners.push(fn); return { dispose() {} }; },
+  createFileSystemWatcher: () => ({
+    onDidChange: () => ({ dispose() {} }),
+    onDidCreate: () => ({ dispose() {} }),
+    onDidDelete: () => ({ dispose() {} }),
+    dispose() {}
+  }),
   get textDocuments() { return openDocs; },
   asRelativePath: (uri) => uri.path.replace(/^\/w\//, ''),
-  findFiles: async () => [...files.values()].map((f) => f.uri),
+  findFiles: async (include) => {
+    const all = [...files.values()].map((f) => f.uri);
+    return include.includes('.lugus') ? all.filter((u) => u.path.includes('/.lugus/rules/')) : all;
+  },
   openTextDocument: async (uri) => {
     const existing = openDocs.find((d) => d.uri.toString() === uri.toString());
     if (existing) return existing;
@@ -138,21 +187,47 @@ const workspace = {
     return doc;
   },
   registerTextDocumentContentProvider: () => ({ dispose() {} }),
-  getWorkspaceFolder: () => undefined,
+  getWorkspaceFolder: (uri) => (uri.path.startsWith('/w/') ? { uri: Uri.file('/w'), name: 'w', index: 0 } : undefined),
   workspaceFolders: undefined,
   fs: {
     readFile: async (uri) => {
       const f = files.get(uri.toString());
       if (!f) throw new Error('nope');
-      return Buffer.from(f.text);
+      const open = openDocs.find((d) => d.uri.toString() === uri.toString());
+      return Buffer.from(open ? open.text : f.text);
     },
-    stat: async (uri) => ({ size: Buffer.byteLength(files.get(uri.toString())?.text ?? '') })
+    stat: async (uri) => {
+      const f = files.get(uri.toString());
+      if (f) return { size: Buffer.byteLength(f.text), type: 1 };
+      const prefix = uri.toString() + '/';
+      if ([...files.keys()].some((k) => k.startsWith(prefix))) return { size: 0, type: 2 };
+      throw new Error('not found');
+    },
+    writeFile: async (uri, bytes) => {
+      fsLog.push(['write', uri.path]);
+      files.set(uri.toString(), { uri, text: Buffer.from(bytes).toString('utf8'), languageId: 'json' });
+    },
+    delete: async (uri) => {
+      fsLog.push(['delete', uri.path]);
+      if (!files.delete(uri.toString())) throw new Error('not found');
+    },
+    createDirectory: async () => {},
+    rename: async (from, to) => {
+      fsLog.push(['rename', from.path, to.path]);
+      for (const [k, f] of [...files.entries()]) {
+        if (k === from.toString() || k.startsWith(from.toString() + '/')) {
+          const nu = Uri.file(to.path + f.uri.path.slice(from.path.length));
+          files.delete(k);
+          files.set(nu.toString(), { ...f, uri: nu });
+        }
+      }
+    }
   }
 };
 
 module.exports = {
   Position, Range, Uri, EventEmitter, ThemeColor, TabInputTextDiff, CodeLens,
-  Diagnostic, CodeAction, Selection,
+  Diagnostic, CodeAction, Selection, SymbolKind,
   DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
   CodeActionKind: { QuickFix: 'quickfix' },
   TextEditorRevealType: { InCenter: 2 },
@@ -174,11 +249,16 @@ module.exports = {
     registerCommand: (id, fn) => { commands.set(id, fn); return { dispose() {} }; },
     executeCommand: async (id, ...args) => {
       if (id === 'vscode.diff') { log.diffs.push(args); return; }
+      if (id === 'vscode.executeDocumentSymbolProvider') {
+        if (!symbolProvider.enabled) return undefined;
+        const doc = openDocs.find((d) => d.uri.toString() === args[0].toString()) || (window.activeTextEditor && window.activeTextEditor.document.uri.toString() === args[0].toString() ? window.activeTextEditor.document : null);
+        return doc ? computeSymbols(doc) : [];
+      }
       return commands.get(id)(...args);
     }
   },
   __test: {
-    log, answers, settings, commands, Document, Editor, diagnostics, files, openDocs,
+    log, answers, settings, commands, Document, Editor, diagnostics, files, openDocs, fsLog, renameListeners, symbolProvider,
     getCodeLens: () => codeLensProvider,
     getCodeActions: () => codeActionProvider
   }
